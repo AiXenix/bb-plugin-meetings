@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Zoom meeting on web</title>
+    <link rel="stylesheet" href="mock.css" />
+  </head>
+  <body>
+    <!-- Imitates the Zoom web client DOM that the bot's Zoom adapter reads
+         (docs/dev/DESIGN.md §6.3, docs/dev/research-zoom-probe.md). -->
+    <div id="root">
+      <div class="preview-root" role="presentation" id="prejoin">
+        <div class="preview-new-flow preview">
+          <div class="preview-new-flow-content">
+            <div id="preview-av-video" class="preview-video">
+              <div class="preview-video__placeholder">Mock meeting</div>
+              <div class="preview-video__controls">
+                <button type="button" id="preview-audio-control-button" class="preview-video__control-button" aria-label="Mute">Mute</button>
+                <button type="button" id="preview-video-control-button" class="preview-video__control-button" aria-label="Stop Video">Stop Video</button>
+              </div>
+            </div>
+            <div class="preview-meeting-info">
+              <div class="preview-meeting-info__title">Enter Meeting Info</div>
+              <label class="preview-meeting-info__field-title" for="input-for-name">Your Name</label>
+              <input id="input-for-name" type="text" autocomplete="off" required maxlength="128" aria-describedby="error-for-name" />
+              <button type="button" class="zm-btn preview-join-button disabled zm-btn__outline--blue zm-btn--disabled" tabindex="-1">Join</button>
+              <div class="preview-agreement">This is a local test page, not Zoom.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="waiting-room" class="waiting-room" hidden>
+        <div class="waiting-room__title">Please wait, the meeting host will let you in soon.</div>
+      </div>
+
+      <div id="meeting-app" class="meeting-app" hidden>
+        <div id="wc-content">
+          <div id="wc-container-left">
+            <div id="video-share-layout">
+              <div id="gallery" class="gallery-video-container"></div>
+            </div>
+          </div>
+          <div id="wc-container-right" hidden>
+            <div class="chat-container" id="chat-container">
+              <div class="chat-header">Chat</div>
+              <div role="application" aria-label="Chat Message List" class="chat-virtuoso-wrapper" id="chat-list"></div>
+              <div class="chat-rtf-box__editor-outer">
+                <div class="tiptap ProseMirror chat-rtf-box__editor" contenteditable="true" id="chat-editor"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <footer id="wc-footer" role="presentation" class="footer main-footer footer--desktop-layout">
+          <div id="foot-bar" class="footer__inner">
+            <div footer-section="left" class="footer__btns-container">
+              <button type="button" id="audio-button" class="footer-button-base__button ax-outline join-audio-container__btn" aria-label="audio">
+                <span class="footer-button-base__button-label">Audio</span>
+              </button>
+              <button type="button" id="video-button" class="footer-button-base__button ax-outline send-video-container__btn" aria-label="Video">
+                <span class="footer-button-base__button-label">Video</span>
+              </button>
+            </div>
+            <div footer-section="mid" class="footer__btns-container">
+              <button type="button" id="participants-button" class="footer-button-base__button ax-outline footer-button__button" aria-label="open the participants list pane,[1] particpants">
+                <span class="footer-button__number-counter"><span id="participants-count">1</span></span>
+                <span class="footer-button-base__button-label">Participants</span>
+              </button>
+              <button type="button" id="chat-button" class="footer-button-base__button ax-outline footer-button__button" aria-label="open the chat panel">
+                <span class="footer-button-base__button-label">Chat</span>
+              </button>
+            </div>
+            <div footer-section="right" class="footer__btns-container">
+              <button type="button" id="leave-button" class="footer-button-base__button ax-outline footer-button__button" aria-label="Leave">
+                <span class="footer-button-base__button-label">Leave</span>
+              </button>
+              <div id="leave-popover" class="leave-meeting-options" hidden>
+                <button type="button" id="leave-confirm" class="zm-btn leave-meeting-options__btn leave-meeting-options__btn--danger">Leave Meeting</button>
+              </div>
+            </div>
+          </div>
+        </footer>
+      </div>
+
+      <div id="left-page" class="left-page" hidden>You left the meeting.</div>
+      <div id="modal-root"></div>
+      <div id="status" class="mock-status"></div>
+    </div>
+    <script src="mock.js"></script>
+  </body>
+</html>
