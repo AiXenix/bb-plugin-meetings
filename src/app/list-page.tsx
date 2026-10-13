@@ -1,12 +1,15 @@
 // The Meetings list page: join form, environment banner, global search,
-// "Сейчас" / "Запланированные" / "Прошедшие" and the Zoom account card.
+// "Сейчас" / "Запланированные" (+ the Google Calendar card) / "Прошедшие",
+// the bot's name and avatar and the Zoom account card.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRealtime } from "@get-bb/plugin-sdk/app";
 import type { CalendarEventView, CalendarStatus, MeetingSummary } from "../shared/rpc-contract";
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
+import { BotCard } from "./bot-card";
 import {
   CHANNEL_CALENDAR_CHANGED,
+  CHANNEL_GOOGLE_CHANGED,
   CHANNEL_MEETING_CHANGED,
   CHANNEL_MEETING_SEGMENTS,
   LIVE_STATUSES,
@@ -14,6 +17,7 @@ import {
 } from "./constants";
 import { EnvBanner, useEnvStatus } from "./env-banner";
 import { formatDateTime } from "./format";
+import { GoogleCalendarCard, useGoogleStatus } from "./google-card";
 import { useAsyncAction, useDebouncedCallback, useInterval, useMountedRef, useOnReconnect } from "./hooks";
 import { JoinForm } from "./join-form";
 import { CalendarEventRow, LiveMeetingCard, PastMeetingRow, ScheduledRow } from "./meeting-cards";
@@ -123,6 +127,8 @@ function useCalendarStatus() {
   useEffect(refetch, [refetch]);
   const debounced = useDebouncedCallback(refetch, 300);
   useRealtime(CHANNEL_CALENDAR_CHANGED, debounced);
+  // Connecting, syncing or disconnecting Google changes the upcoming events too.
+  useRealtime(CHANNEL_GOOGLE_CHANGED, debounced);
   useOnReconnect(refetch);
   const sync = useAsyncAction(async () => {
     const result = await rpc.call("calendar.sync");
@@ -134,13 +140,15 @@ function useCalendarStatus() {
     },
     [mounted],
   );
-  return { calendar, error, sync, update };
+  return { calendar, error, refetch, sync, update };
 }
 
 export function ListPage({ nav }: { nav: MeetingsNav }) {
   const env = useEnvStatus();
   const { state, error, refetch, loadMore } = useMeetingLists();
-  const { calendar, error: calendarError, sync, update: setCalendar } = useCalendarStatus();
+  const { calendar, error: calendarError, refetch: refetchCalendar, sync, update: setCalendar } = useCalendarStatus();
+  const google = useGoogleStatus();
+  const calendarOn = calendar?.configured === true || google.status?.connected === true;
 
   const sections = useMemo(() => {
     if (state === null) return null;
@@ -219,12 +227,12 @@ export function ListPage({ nav }: { nav: MeetingsNav }) {
             </Section>
           )}
 
-          {hasUpcoming || calendar?.configured === true ? (
+          {hasUpcoming || calendarOn ? (
             <Section
               title="Запланированные"
               count={upcomingRows.length}
               actions={
-                calendar?.configured === true ? (
+                calendarOn ? (
                   <Button
                     type="button"
                     variant="ghost"
@@ -259,7 +267,7 @@ export function ListPage({ nav }: { nav: MeetingsNav }) {
               ) : (
                 <EmptyState>В ближайшие сутки в календаре нет встреч.</EmptyState>
               )}
-              {calendar?.configured === true ? (
+              {calendar !== null && calendarOn ? (
                 <p className="mt-1.5 px-1 text-xs text-muted-foreground">
                   {calendar.autoJoin
                     ? "Автоподключение по календарю включено"
@@ -273,6 +281,8 @@ export function ListPage({ nav }: { nav: MeetingsNav }) {
               <ErrorText className="mt-1 text-xs">{sync.error ?? calendarError}</ErrorText>
             </Section>
           ) : null}
+
+          <GoogleCalendarCard google={google} calendar={calendar} onCalendarChanged={refetchCalendar} />
 
           <Section title="Прошедшие">
             {sections.past.length === 0 ? (
@@ -305,6 +315,7 @@ export function ListPage({ nav }: { nav: MeetingsNav }) {
         </>
       )}
 
+      <BotCard />
       <ZoomAccountCard nav={nav} />
     </PageFrame>
   );

@@ -38,6 +38,14 @@ export interface HostPaths {
   readonly gigaamFile: string;
   /** PulseAudio client.conf with autospawn disabled, for the host's own pactl calls. */
   readonly pulseClientConf: string;
+  /** The bot's avatar and what is rendered from it (DESIGN §14). */
+  readonly botDir: string;
+  /** The normalized avatar: a square PNG. */
+  readonly avatar: string;
+  /** Rendered camera videos, `<sha12>.mjpeg`. */
+  readonly avatarRenders: string;
+  /** 1 s of silence (48 kHz mono WAV) for Chrome's fake microphone. */
+  readonly silenceWav: string;
 }
 
 export function hostPaths(dataDir: string, runtimeHash: string = RUNTIME_HASH): HostPaths {
@@ -48,6 +56,7 @@ export function hostPaths(dataDir: string, runtimeHash: string = RUNTIME_HASH): 
   const logs = path.join(root, "logs");
   const packages = path.join(root, "packages");
   const profiles = path.join(root, "profiles");
+  const botDir = path.join(root, "bot");
   return {
     root,
     bin: path.join(root, "bin"),
@@ -75,6 +84,10 @@ export function hostPaths(dataDir: string, runtimeHash: string = RUNTIME_HASH): 
     zoomProfile: path.join(profiles, "zoom"),
     gigaamFile: path.join(root, "gigaam.json"),
     pulseClientConf: path.join(root, "pulse-client.conf"),
+    botDir,
+    avatar: path.join(botDir, "avatar.png"),
+    avatarRenders: path.join(botDir, "render"),
+    silenceWav: path.join(botDir, "silence.wav"),
   };
 }
 

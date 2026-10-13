@@ -58,6 +58,13 @@ export const botConfigSchema = z
      * mode=meeting copies it into the meeting's own profile dir when set. null = fresh guest profile.
      */
     zoomProfileDir: z.string().nullable(),
+    /** Show the bot's avatar as its camera (server sets it from settings; the host renders the video). */
+    avatar: z.boolean().default(false),
+    /**
+     * Absolute path of the rendered avatar video (MJPEG, 1280x720, avatar + bot name) for Chrome's fake
+     * camera. Filled by the host at meeting.start when `avatar` is on and an avatar image exists; null = camera off.
+     */
+    avatarVideo: z.string().nullable().default(null),
     liveTranscription: z.boolean(),
     transcriber: transcriberConfigSchema,
     createdAt: z.number().int(),

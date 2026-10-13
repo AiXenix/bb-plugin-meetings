@@ -47,7 +47,31 @@ read with these tools goes to your model provider.
 
 Everything else is in the CLI (`bb meetings --help`): `list`, `show`, `cancel`,
 `delete <id> --yes`, `retranscribe`, `logs`, `screenshot`, `import <file>`,
-`calendar`, `zoom-login`, `doctor`, `setup`, `selftest`.
+`calendar`, `google`, `bot`, `zoom-login`, `doctor`, `setup`, `selftest`.
+
+### Calendar auto-join and the bot's look
+
+- **Google Calendar** is connected with the user's own OAuth client: Client ID
+  and Secret pasted in the **Google Календарь** card on the Встречи page, then
+  "Подключить Google Календарь". The user does this in the browser; you cannot.
+  - `bb meetings google` shows the connection, the watched calendars, the last
+    sync and errors.
+  - `bb meetings google sync` re-reads now; `bb meetings google disconnect`
+    revokes access.
+  - "Доступ к Google отозван или истёк": the consent screen is in *Testing*
+    (7-day tokens). The user must reconnect, or publish the app in Google Cloud.
+- ICS feeds work as before (`calendarIcsUrls`).
+- **What auto-join does.** With `calendarAutoJoin` on (a toggle on the page),
+  every event with a Zoom link gets a scheduled bot `calendarLeadMinutes`
+  early. The bot leaves when the call ends. Calendar recordings are capped at
+  the event length + `calendarOvertimeMinutes`.
+- `bb meetings calendar` lists the events; skip one with
+  `bb meetings calendar skip <key>`.
+- **Bot name and avatar**: `bb meetings bot` shows them.
+  - `bb meetings bot --name "…"` renames the bot (or use the Бот card).
+  - The avatar is uploaded on the page. The bot then shows it as its camera,
+    with the name under it (`showAvatar`).
+  - A per-meeting name goes to `meetings_join botName`.
 
 ### Workflow
 

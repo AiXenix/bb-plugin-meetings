@@ -59,6 +59,14 @@ const regexOrText = z.string().refine((value) => {
   }
 }, "Некорректное регулярное выражение");
 
+/** A Google OAuth client id or secret: no whitespace, ≤ 300 characters; empty = not set. */
+function googleCredential(name: string) {
+  return z
+    .string()
+    .max(300, `${name}: не длиннее 300 символов`)
+    .refine((value) => !/\s/.test(value), `${name}: без пробелов и переносов строк`);
+}
+
 export const DIARIZATION_LABELS: Readonly<Record<DiarizationMode, string>> = {
   "ui+acoustic": "Интерфейс Zoom + голоса (точнее)",
   ui: "Только по интерфейсу Zoom",
@@ -73,6 +81,13 @@ export function defineSettings(bb: BbPluginApi) {
       description: "Под этим именем бот появляется во встрече.",
       experimental_schema: z.string().trim().min(1, "Имя не может быть пустым").max(64, "Не длиннее 64 символов"),
       default: "Notetaker",
+    },
+    showAvatar: {
+      type: "boolean",
+      label: "Показывать аватар бота",
+      description:
+        "Бот включает камеру и показывает картинку с аватаром и своим именем. Картинку загружают на странице «Встречи»; без неё камера выключена.",
+      default: true,
     },
     maxDurationMinutes: {
       type: "number",
@@ -214,6 +229,14 @@ export function defineSettings(bb: BbPluginApi) {
       experimental_schema: z.number().min(0).max(30),
       default: 1,
     },
+    calendarOvertimeMinutes: {
+      type: "number",
+      label: "Задержаться после конца события, мин",
+      description:
+        "Бот из календаря уходит не позже чем через это время после запланированного конца события (0–600; 0 — без ограничения, действует только «Максимальная длительность»).",
+      experimental_schema: z.number().int().min(0).max(600),
+      default: 60,
+    },
     calendarFilter: {
       type: "string",
       label: "Фильтр событий",
@@ -227,6 +250,21 @@ export function defineSettings(bb: BbPluginApi) {
       description: "Как часто перечитывать календари (1–120).",
       experimental_schema: z.number().int().min(1).max(120),
       default: 5,
+    },
+    googleClientId: {
+      type: "string",
+      label: "Google Client ID",
+      description:
+        "OAuth-клиент типа «Веб-приложение» из Google Cloud (включён Google Calendar API). Подключение аккаунта — на странице «Встречи».",
+      experimental_schema: googleCredential("Client ID"),
+      default: "",
+    },
+    googleClientSecret: {
+      type: "string",
+      label: "Google Client Secret",
+      description: "Секрет того же OAuth-клиента Google.",
+      secret: true,
+      experimental_schema: googleCredential("Client Secret"),
     },
   });
 }

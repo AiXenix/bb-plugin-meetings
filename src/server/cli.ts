@@ -1,5 +1,6 @@
 // `bb meetings …` (docs/dev/DESIGN.md §8.1). Output is English for agents,
 // every command takes --json, and output stays far below the 1 MiB CLI cap.
+import { readFile, stat } from "node:fs/promises";
 import {
   PluginCliError,
   cliCommand,
@@ -8,8 +9,9 @@ import {
   type PluginCliResult,
 } from "@get-bb/plugin-sdk";
 import { maskMeetingUrl } from "../shared/meeting-url.js";
-import { MEETING_STATUSES, type MeetingStatus } from "../shared/rpc-contract.js";
+import { GOOGLE_CALLBACK_PATH, MEETING_STATUSES, type BotProfile, type GoogleStatus, type MeetingStatus } from "../shared/rpc-contract.js";
 import { AGENT_ACTIONS, parseAgentRequest, runAgentRequest } from "./agent-api.js";
+import { AVATAR_MAX_BYTES, avatarType } from "./bot-profile.js";
 import type { CalendarService } from "./calendar-service.js";
 import type { MeetingRow } from "./db.js";
 import { MeetingsError, parseStartTime } from "./errors.js";
@@ -85,6 +87,42 @@ export function registerCli(bb: BbPluginApi, service: MeetingsService): void {
     const base = bb.server.experimental_appUrl;
     return base ? `${base.replace(/\/+$/, "")}/plugins/meetings/meetings` : "the Meetings page in bb (sidebar: «Встречи»)";
   };
+  const redirectUri = () => {
+    const base = bb.server.experimental_appUrl;
+    return `${base ? base.replace(/\/+$/, "") : "<bb origin>"}${GOOGLE_CALLBACK_PATH}`;
+  };
+  const googleText = (status: GoogleStatus): string => {
+    if (!status.configured) {
+      return [
+        "Google Calendar: not set up.",
+        "Create an OAuth client of type Web application in Google Cloud (Google Calendar API enabled), register the redirect URI",
+        `  ${redirectUri()}`,
+        `and save its Client ID and secret on ${pageLink()} -> Google Календарь (or: bb plugin config meetings set googleClientId <id>).`,
+      ].join("\n");
+    }
+    if (!status.connected) {
+      return [
+        `Google Calendar: not connected${status.email ? ` (was ${status.email})` : ""}.${status.lastError ? ` Error: ${status.lastError}` : ""}`,
+        `Connecting needs a browser: open ${pageLink()} -> Google Календарь -> Подключить.`,
+        `Redirect URI registered in the OAuth client must be: ${redirectUri()}`,
+      ].join("\n");
+    }
+    const watched = status.calendars.filter((calendar) => calendar.selected);
+    return [
+      `Google Calendar: connected${status.email ? ` as ${status.email}` : ""}`,
+      `Watched calendars: ${watched.map((calendar) => `${calendar.summary}${calendar.primary ? " (primary)" : ""}`).join(", ") || "none"} [${watched.length} of ${status.calendars.length}]`,
+      `Last sync: ${isoMinute(status.lastSyncAt)}${status.lastError ? `, error: ${status.lastError}` : ""}`,
+      `Upcoming Zoom meetings in the next 24 h: ${status.upcomingCount} (list them: bb meetings calendar)`,
+      `Choose calendars on ${pageLink()} -> Google Календарь.`,
+    ].join("\n");
+  };
+  const botText = (profile: BotProfile): string =>
+    [
+      `Bot name: ${profile.botName}`,
+      profile.avatar.hasAvatar
+        ? `Avatar: set${profile.avatar.version !== null ? ` (updated ${isoMinute(profile.avatar.version)})` : ""}, camera in meetings: ${profile.avatar.enabled ? "on" : "off"}`
+        : `Avatar: none, the camera stays off (upload a picture on ${pageLink()} -> Бот, or: bb meetings bot --avatar <file on the bb server machine>)`,
+    ].join("\n");
 
   bb.cli.register(
     defineCli({
@@ -487,7 +525,7 @@ export function registerCli(bb: BbPluginApi, service: MeetingsService): void {
         }),
 
         calendar: cliCommand({
-          summary: "List upcoming calendar meetings (from the ICS feeds)",
+          summary: "List upcoming calendar meetings (from the ICS feeds and Google Calendar)",
           aliases: ["calendar list"],
           options: { json },
           run: (input) => guard(async () => {
@@ -498,7 +536,7 @@ export function registerCli(bb: BbPluginApi, service: MeetingsService): void {
         }),
 
         "calendar sync": cliCommand({
-          summary: "Fetch the ICS feeds now and schedule auto-join meetings",
+          summary: "Fetch the ICS feeds and Google calendars now and schedule auto-join meetings",
           options: { json },
           run: (input, ctx) => guard(async () => {
             const status = await service.calendar.sync(ctx.signal);
@@ -526,6 +564,74 @@ export function registerCli(bb: BbPluginApi, service: MeetingsService): void {
             const status = await service.calendar.setSkip(input.positionals.key, false);
             if (input.options.json) return outJson(maskCalendar(status));
             return out(calendarText(status));
+          }),
+        }),
+
+        google: cliCommand({
+          summary: "Show the Google Calendar connection: account, watched calendars, last sync (connecting needs the Meetings page)",
+          aliases: ["google status"],
+          options: { json },
+          run: (input) => guard(async () => {
+            const status = await service.google.status();
+            if (input.options.json) return outJson(status);
+            return out(googleText(status));
+          }),
+        }),
+
+        "google sync": cliCommand({
+          summary: "Fetch the watched Google calendars (and the ICS feeds) now",
+          options: { json },
+          run: (input, ctx) => guard(async () => {
+            const status = await service.google.sync(ctx.signal);
+            if (input.options.json) return outJson(status);
+            return out(googleText(status));
+          }),
+        }),
+
+        "google disconnect": cliCommand({
+          summary: "Disconnect Google Calendar: revoke and delete the tokens, cancel bots scheduled from it",
+          options: { json },
+          run: (input) => guard(async () => {
+            const status = await service.google.disconnect();
+            if (input.options.json) return outJson(status);
+            return out("Google Calendar disconnected; its tokens were revoked and deleted, bots scheduled from it were cancelled.");
+          }),
+        }),
+
+        bot: cliCommand({
+          summary: "Show or change the bot's name and avatar",
+          description:
+            "Without options prints the bot's name and avatar. --avatar reads an image file on the machine where the bb server runs; from anywhere else upload the picture on the Meetings page.",
+          options: {
+            name: { type: "string", description: "New bot name shown in Zoom (1-64 characters)", placeholder: "NAME" },
+            "show-avatar": { type: "enum", values: ["on", "off"], description: "Turn the camera with the avatar on or off in meetings" },
+            avatar: {
+              type: "string",
+              description: "PNG, JPEG or WebP (≤ 3 MiB) on the bb server machine to use as the avatar",
+              placeholder: "PATH",
+            },
+            "clear-avatar": { type: "boolean", description: "Remove the avatar (the camera stays off)" },
+            json,
+          },
+          constraints: [{ kind: "at-most-one", options: ["avatar", "clear-avatar"] }],
+          run: (input, ctx) => guard(async () => {
+            const { name, avatar } = input.options;
+            const showAvatar = input.options["show-avatar"];
+            let profile: BotProfile | null = null;
+            if (name !== undefined || showAvatar !== undefined) {
+              profile = await service.bot.updateProfile({
+                ...(name === undefined ? {} : { botName: name }),
+                ...(showAvatar === undefined ? {} : { showAvatar: showAvatar === "on" }),
+              });
+            }
+            if (avatar !== undefined) {
+              const path = avatar.startsWith("/") || !ctx.cwd ? avatar : `${ctx.cwd.replace(/\/+$/, "")}/${avatar}`;
+              profile = await service.bot.setAvatar((await readAvatarFile(path)).toString("base64"));
+            }
+            if (input.options["clear-avatar"]) profile = await service.bot.clearAvatar();
+            profile ??= await service.bot.profile();
+            if (input.options.json) return outJson(profile);
+            return out(botText(profile));
           }),
         }),
 
@@ -606,13 +712,36 @@ export function registerCli(bb: BbPluginApi, service: MeetingsService): void {
   );
 }
 
+/** An avatar image on the bb server machine (the CLI runs in the server process). */
+async function readAvatarFile(path: string): Promise<Buffer> {
+  let size: number;
+  try {
+    const info = await stat(path);
+    if (!info.isFile()) throw new Error("not a file");
+    size = info.size;
+  } catch {
+    throw new MeetingsError(
+      "not_found",
+      `Файл ${path} не найден на машине сервера bb`,
+      `No image file at ${path} on the bb server machine`,
+      "The path is read where the bb server runs; from another machine upload the picture on the Meetings page",
+    );
+  }
+  if (size > AVATAR_MAX_BYTES) {
+    throw new MeetingsError("avatar_too_large", "Картинка больше 3 МБ", `The image is ${(size / 1024 / 1024).toFixed(1)} MiB; the limit is 3 MiB`);
+  }
+  const bytes = await readFile(path);
+  avatarType(bytes);
+  return bytes;
+}
+
 function maskCalendar<T extends { upcoming: Array<{ url: string | null }> }>(status: T): T {
   return { ...status, upcoming: status.upcoming.map((event) => ({ ...event, url: event.url === null ? null : maskMeetingUrl(event.url) })) };
 }
 
 function calendarText(status: Awaited<ReturnType<CalendarService["status"]>>): string {
   if (!status.configured) {
-    return "No calendars configured. Add ICS feed URLs in the plugin settings (calendarIcsUrls), then: bb meetings calendar sync";
+    return "No calendars configured. Add ICS feed URLs in the plugin settings (calendarIcsUrls) or connect Google Calendar on the Meetings page (bb meetings google), then: bb meetings calendar sync";
   }
   const lines = [
     `Calendars: ${status.feeds}, auto-join ${status.autoJoin ? "on" : "off"}, last sync ${isoMinute(status.lastSyncAt)}${status.lastError ? `, error: ${status.lastError}` : ""}`,

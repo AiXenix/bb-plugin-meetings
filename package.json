@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-meetings",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "engines": {
     "bb": ">=0.46",
@@ -70,7 +70,10 @@
     "transcription",
     "diarization",
     "gigaam",
-    "russian"
+    "russian",
+    "google-calendar",
+    "oauth",
+    "avatar"
   ],
   "scripts": {
     "embed": "node scripts/embed-runtime.mjs",

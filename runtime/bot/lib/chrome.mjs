@@ -140,9 +140,10 @@ async function loadPlaywright() {
 /**
  * Launch headed Chrome on `display` with a persistent profile. Returns
  * { context, page }. `initScripts` are page-script sources installed before
- * any page script runs (every frame).
+ * any page script runs (every frame). `mediaArgs` are the fake camera and
+ * microphone switches of an avatar run (lib/media.mjs fakeMediaArgs).
  */
-export async function launchChrome({ chromePath, profileDir, display, pulse, initScripts = [], log }) {
+export async function launchChrome({ chromePath, profileDir, display, pulse, initScripts = [], mediaArgs = [], log }) {
   const { chromium } = await loadPlaywright();
   const env = { ...process.env, DISPLAY: display };
   if (pulse) {
@@ -169,6 +170,7 @@ export async function launchChrome({ chromePath, profileDir, display, pulse, ini
     "--disable-renderer-backgrounding",
     "--disable-backgrounding-occluded-windows",
     "--hide-crash-restore-bubble",
+    ...mediaArgs,
   ];
   // The bot handles SIGTERM/SIGINT/SIGHUP itself (leave politely, stop ffmpeg,
   // clean up). Playwright's defaults would close Chrome at once on SIGTERM
@@ -214,7 +216,7 @@ export async function launchChrome({ chromePath, profileDir, display, pulse, ini
   const page = context.pages()[0] ?? (await context.newPage());
   for (const extra of context.pages().slice(1)) await extra.close().catch(() => {});
   const viewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight })).catch(() => null);
-  log("info", "Chrome started", { chromePath, display, viewport });
+  log("info", "Chrome started", { chromePath, display, viewport, ...(mediaArgs.length > 0 ? { mediaArgs } : {}) });
   return { context, page };
 }
 

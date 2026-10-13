@@ -8,6 +8,7 @@
 // docs/dev/DESIGN.md.
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { hostContract } from "./src/shared/contract.js";
+import { CHANNEL_BOT_CHANGED, CHANNEL_GOOGLE_CHANGED } from "./src/shared/rpc-contract.js";
 import { registerCli } from "./src/server/cli.js";
 import { Repository, openDatabase } from "./src/server/db.js";
 import { registerHttp } from "./src/server/http.js";
@@ -23,7 +24,7 @@ export interface PluginOptions extends ServiceOptions {
   readonly onService?: (service: MeetingsService) => void;
 }
 
-/** The plugin factory; options exist for tests (clock, polling, ICS fetching). */
+/** The plugin factory; options exist for tests (clock, polling, ICS fetching, Google endpoints). */
 export function createMeetingsPlugin(options: PluginOptions = {}) {
   return async function plugin(bb: BbPluginApi): Promise<void> {
     const settings = defineSettings(bb);
@@ -41,6 +42,11 @@ export function createMeetingsPlugin(options: PluginOptions = {}) {
       service.wake();
       // Auto-join, filter and feed changes apply to already scheduled calendar bots right away.
       service.calendar.settingsChanged(next, prev);
+      if (next.botName !== prev.botName || next.showAvatar !== prev.showAvatar) bb.realtime.publish(CHANNEL_BOT_CHANGED, {});
+      if (next.googleClientId !== prev.googleClientId || next.googleClientSecret !== prev.googleClientSecret) {
+        service.google.settingsChanged(next, prev);
+        bb.realtime.publish(CHANNEL_GOOGLE_CHANGED, {});
+      }
     });
     const offWorkerExit = host.experimental_onWorkerExit(() => service.wake());
     bb.onDispose(() => {

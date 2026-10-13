@@ -3,8 +3,9 @@
 // except two symbol-keyed caches on window. Every op returns plain JSON.
 //
 // Ops: markers (join-flow state), sample (speaker/roster signals), sweep
-// (dismiss harmless popups), audio (computer audio / mute / camera), leave,
-// chat, click, forensics, store (discovery report).
+// (dismiss harmless popups), audio (computer audio / mute / camera off),
+// video (the avatar camera button), leave, chat, click, forensics, store
+// (discovery report).
 (args) => {
   const sel = args.sel || {};
   const STORE_KEY = Symbol.for("mtg.store");
@@ -415,6 +416,30 @@
     return { label: state.label, joined: state.joined, muted: state.muted, clicked };
   };
 
+  /**
+   * The footer camera button (the avatar camera, DESIGN §14): what it says,
+   * the icon class (SvgVideoOn / SvgVideoOff / SvgVideoOffDisallowed), and a
+   * click on request. The on/off decision is made in Node (lib/media.mjs videoIsOn).
+   */
+  const videoButton = () =>
+    q("button.send-video-container__btn") ||
+    qa('#foot-bar button[aria-label*="video" i], #wc-footer button[aria-label*="video" i]').find((el) => !/more|setting|background|filter/i.test(label(el))) ||
+    null;
+  const video = (action) => {
+    const button = videoButton();
+    const svg = button ? q("svg", button) : null;
+    const info = {
+      found: !!button,
+      label: label(button),
+      text: textOf(button),
+      icon: svg ? clean(svg.getAttribute("class")) : "",
+      disabled: !!button && (button.disabled || button.getAttribute("aria-disabled") === "true"),
+      clicked: false,
+    };
+    if (action === "click" && button && !info.disabled) info.clicked = press(button);
+    return info;
+  };
+
   // ------------------------------------------------------------ actions
   const click = (selectors, mode) => {
     const el = mode === "any" ? firstAny(selectors) : firstVisible(selectors);
@@ -505,8 +530,27 @@
       return out;
     };
     const list = state.attendeesList && state.attendeesList.attendeesList;
+    // Which devices Zoom picked: with the avatar camera Chrome's fake devices are in the lists,
+    // and only the "default" output reaches the recording.
+    const device = (d) => {
+      if (d === null || d === undefined) return null;
+      if (typeof d !== "object") return String(d).slice(0, 120);
+      return { deviceId: String(d.deviceId ?? d.id ?? "").slice(0, 80), label: String(d.label ?? d.name ?? "").slice(0, 120) };
+    };
+    const deviceList = (l) => (Array.isArray(l) ? l.slice(0, 8).map(device) : null);
+    const audioState = state.audio || {};
+    const videoState = state.video || {};
     return {
       found: true,
+      devices: {
+        activeSpeaker: device(audioState.activeSpeaker),
+        speakers: deviceList(audioState.speakerDevicesList),
+        activeMicrophone: device(audioState.activeMicrophone),
+        microphones: deviceList(audioState.microphoneDevicesList),
+        activeCamera: device(videoState.activeCameraDevice),
+        cameras: deviceList(videoState.cameraDevicesList),
+        mirror: typeof videoState.isMirrorMyVideo === "boolean" ? videoState.isMirrorMyVideo : null,
+      },
       topKeys: Object.keys(state).slice(0, 200),
       audioKeys: Object.keys(state.audio || {}).slice(0, 100),
       asnIds: state.audio ? state.audio.asnIds : undefined,
@@ -580,6 +624,8 @@
       return sweep();
     case "audio":
       return audio(args.action);
+    case "video":
+      return video(args.action);
     case "leave":
       return leave(args.step);
     case "chat":

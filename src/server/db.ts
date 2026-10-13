@@ -1,6 +1,7 @@
 // SQLite registry (docs/dev/DESIGN.md §7): meetings, their segments with a
-// manually maintained FTS5 index, and calendar occurrences. Migrations are
-// append-only: never edit or reorder a statement once it has shipped.
+// manually maintained FTS5 index, calendar occurrences and the Google
+// Calendar connection (§13). Migrations are append-only: never edit or
+// reorder a statement once it has shipped.
 import { randomBytes } from "node:crypto";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type Database from "better-sqlite3";
@@ -94,6 +95,21 @@ export const MIGRATIONS: readonly string[] = [
     updated_at INTEGER NOT NULL
   )`,
   `CREATE INDEX calendar_events_starts ON calendar_events(starts_at)`,
+  // Google Calendar over OAuth (DESIGN §13): one row; tokens never leave the server.
+  `CREATE TABLE google_auth (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    refresh_token TEXT,
+    access_token TEXT,
+    access_expires_at INTEGER,
+    email TEXT,
+    scope TEXT,
+    connected_at INTEGER,
+    selected_calendars_json TEXT NOT NULL DEFAULT '[]',
+    calendars_json TEXT NOT NULL DEFAULT '[]',
+    last_sync_at INTEGER,
+    last_error TEXT,
+    updated_at INTEGER NOT NULL
+  )`,
 ];
 
 export function openDatabase(bb: BbPluginApi): Db {
@@ -433,6 +449,61 @@ function calendarFromRaw(raw: RawCalendarRow): CalendarEventRow {
   };
 }
 
+/** A calendar from Google's calendarList, as cached for the picker. */
+export interface GoogleCalendarInfo {
+  id: string;
+  summary: string;
+  primary: boolean;
+  color: string | null;
+  /** Hidden in Google Calendar's own list: kept out of the picker unless watched. */
+  hidden?: boolean;
+}
+
+export interface GoogleAuthRow {
+  /** null = not connected (never, or the grant was revoked/expired). */
+  refreshToken: string | null;
+  accessToken: string | null;
+  accessExpiresAt: number | null;
+  email: string | null;
+  scope: string | null;
+  connectedAt: number | null;
+  /** Calendar ids watched for meetings ("primary" until the first calendarList resolves it). */
+  selectedCalendars: string[];
+  /** The last calendarList (≤ 250). */
+  calendars: GoogleCalendarInfo[];
+  lastSyncAt: number | null;
+  lastError: string | null;
+  updatedAt: number;
+}
+
+interface RawGoogleAuthRow {
+  refresh_token: string | null;
+  access_token: string | null;
+  access_expires_at: number | null;
+  email: string | null;
+  scope: string | null;
+  connected_at: number | null;
+  selected_calendars_json: string;
+  calendars_json: string;
+  last_sync_at: number | null;
+  last_error: string | null;
+  updated_at: number;
+}
+
+const GOOGLE_COLUMNS = {
+  refreshToken: "refresh_token",
+  accessToken: "access_token",
+  accessExpiresAt: "access_expires_at",
+  email: "email",
+  scope: "scope",
+  connectedAt: "connected_at",
+  selectedCalendars: "selected_calendars_json",
+  calendars: "calendars_json",
+  lastSyncAt: "last_sync_at",
+  lastError: "last_error",
+  updatedAt: "updated_at",
+} as const satisfies Record<keyof GoogleAuthRow, string>;
+
 export interface SearchRow {
   meetingId: string;
   meetingTitle: string;
@@ -716,6 +787,50 @@ export class Repository {
 
   pruneCalendarEvents(before: number): void {
     this.db.prepare("DELETE FROM calendar_events WHERE starts_at < ?").run(before);
+  }
+
+  /** Forget the occurrences of feeds whose id starts with `prefix` (e.g. "gcal:" on disconnect). */
+  deleteCalendarEventsOfFeeds(prefix: string): void {
+    this.db.prepare("DELETE FROM calendar_events WHERE substr(feed, 1, ?) = ?").run(prefix.length, prefix);
+  }
+
+  // ---------- google ----------
+
+  googleAuth(): GoogleAuthRow | null {
+    const raw = this.db.prepare("SELECT * FROM google_auth WHERE id = 1").get() as RawGoogleAuthRow | undefined;
+    if (raw === undefined) return null;
+    return {
+      refreshToken: raw.refresh_token,
+      accessToken: raw.access_token,
+      accessExpiresAt: raw.access_expires_at,
+      email: raw.email,
+      scope: raw.scope,
+      connectedAt: raw.connected_at,
+      selectedCalendars: parseJson<string[]>(raw.selected_calendars_json, []),
+      calendars: parseJson<GoogleCalendarInfo[]>(raw.calendars_json, []),
+      lastSyncAt: raw.last_sync_at,
+      lastError: raw.last_error,
+      updatedAt: raw.updated_at,
+    };
+  }
+
+  /** Write the given fields of the single row (created on first write); returns the row. */
+  updateGoogleAuth(patch: Partial<GoogleAuthRow>, now = Date.now()): GoogleAuthRow {
+    const entries = Object.entries({ ...patch, updatedAt: patch.updatedAt ?? now }).filter(
+      ([key, value]) => key in GOOGLE_COLUMNS && value !== undefined,
+    ) as Array<[keyof typeof GOOGLE_COLUMNS, unknown]>;
+    const value = (key: keyof typeof GOOGLE_COLUMNS, v: unknown) =>
+      key === "selectedCalendars" || key === "calendars" ? JSON.stringify(v) : v;
+    this.db.transaction(() => {
+      this.db.prepare("INSERT OR IGNORE INTO google_auth (id, updated_at) VALUES (1, ?)").run(now);
+      const sets = entries.map(([key]) => `${GOOGLE_COLUMNS[key]} = ?`).join(", ");
+      this.db.prepare(`UPDATE google_auth SET ${sets} WHERE id = 1`).run(...entries.map(([key, v]) => value(key, v)));
+    })();
+    return this.googleAuth()!;
+  }
+
+  deleteGoogleAuth(): void {
+    this.db.prepare("DELETE FROM google_auth WHERE id = 1").run();
   }
 }
 

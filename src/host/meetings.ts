@@ -19,6 +19,7 @@ import {
   type TranscriberConfig,
   type TranscriberState,
 } from "../shared/runtime-files.js";
+import { renderAvatarVideo } from "./avatar.js";
 import { run, outputTail, which } from "./exec.js";
 import {
   createJsonExclusive,
@@ -65,6 +66,8 @@ const TEARDOWN_GRACE_MS = 1_500;
 const IMPORT_TIMEOUT_MS = 30 * 60_000;
 const TRANSCRIBER_STOP_GRACE_MS = 5_000;
 const MAX_TRANSCRIBER_BACKOFF_MS = 10 * 60_000;
+/** Rendering the avatar video at start (normally ~1 s) must leave meeting.start well inside its deadline. */
+const AVATAR_RENDER_TIMEOUT_MS = 25_000;
 
 /** Environment of every detached process: the worker's env plus where the host data lives. */
 export function childEnv(paths: HostPaths): NodeJS.ProcessEnv {
@@ -291,6 +294,8 @@ const RUN_FILES = [
   F.screenshot,
   F.pids,
   BOT_PROFILE_DIR,
+  // The bot's own silent microphone when <hostData>/bot/silence.wav was missing (runtime/bot/lib/media.mjs).
+  "fake-mic.wav",
 ];
 
 async function prepareDir(paths: HostPaths, dir: string, meetingId: string): Promise<void> {
@@ -368,17 +373,36 @@ export async function liveLoginSessions(paths: HostPaths): Promise<string[]> {
   return live;
 }
 
+/**
+ * config.avatarVideo for a meeting run: the rendered avatar video when the
+ * avatar is enabled and an image exists, else null (camera off). A failed
+ * render costs the camera, never the recording: it is noted in bot.log.
+ */
+async function avatarVideoFor(paths: HostPaths, config: BotConfig, dir: string): Promise<string | null> {
+  if (config.mode !== "meeting" || !config.avatar) return null;
+  try {
+    return await renderAvatarVideo(paths, config.botName, { signal: AbortSignal.timeout(AVATAR_RENDER_TIMEOUT_MS) });
+  } catch (error) {
+    await fs
+      .appendFile(file(dir, F.botLog), `\n=== ${new Date().toISOString()} avatar video not rendered, the camera stays off: ${errorMessage(error)}\n`)
+      .catch(() => undefined);
+    return null;
+  }
+}
+
 export async function startMeeting(paths: HostPaths, input: BotConfig): Promise<RuntimeSnapshot> {
-  const config = botConfigSchema.parse(input);
-  const dir = meetingDir(paths, config.meetingId);
+  const parsed = botConfigSchema.parse(input);
+  const dir = meetingDir(paths, parsed.meetingId);
   await fs.mkdir(paths.meetings, { recursive: true });
-  if (config.mode === "login") {
-    const other = (await liveLoginSessions(paths)).filter((id) => id !== config.meetingId);
+  if (parsed.mode === "login") {
+    const other = (await liveLoginSessions(paths)).filter((id) => id !== parsed.meetingId);
     if (other.length > 0) throw new Error(`Уже идёт вход в Zoom (${other[0]}); завершите его сначала`);
-    if (config.zoomProfileDir !== null) await fs.mkdir(path.dirname(config.zoomProfileDir), { recursive: true });
+    if (parsed.zoomProfileDir !== null) await fs.mkdir(path.dirname(parsed.zoomProfileDir), { recursive: true });
   }
   await requireRuntime(paths, { bot: true });
-  await prepareDir(paths, dir, config.meetingId);
+  await prepareDir(paths, dir, parsed.meetingId);
+  // The host decides the camera; whatever avatarVideo the caller sent is replaced.
+  const config: BotConfig = { ...parsed, avatarVideo: await avatarVideoFor(paths, parsed, dir) };
   await writeJsonAtomic(file(dir, F.config), config);
 
   const pid = await spawnDetached({

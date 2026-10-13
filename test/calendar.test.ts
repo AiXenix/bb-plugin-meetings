@@ -6,6 +6,7 @@ import { parseMeetingUrl } from "../src/shared/meeting-url.js";
 import {
   feedId,
   fetchIcs,
+  isTwinOccurrence,
   matchesFilter,
   parseIcs,
   syncCalendars,
@@ -214,6 +215,40 @@ describe("parseIcs", () => {
   });
 });
 
+describe("isTwinOccurrence", () => {
+  const row = (key: string, uid: string, startMin: number, endMin: number | null, url: string | null) => ({
+    key,
+    uid,
+    feed: "f",
+    title: key,
+    startsAt: NOW + startMin * 60_000,
+    endsAt: endMin === null ? null : NOW + endMin * 60_000,
+    url,
+    status: "confirmed",
+    skipped: false,
+    meetingId: null,
+    updatedAt: NOW,
+  });
+  it("pairs the same event in two calendars, or a copy of it, but not back-to-back events in one room", () => {
+    const room = "https://zoom.us/j/81234567777";
+    const ics = row(`${UID}#a`, UID, 60, 90, ZOOM_WEEKLY);
+    // The same UID (ICS feed and Google), moved a little in one of them, with the link written differently.
+    expect(isTwinOccurrence(ics, row("gcal:me:e1", UID, 70, 95, "https://zoom.us/j/81234567890"))).toBe(true);
+    expect(isTwinOccurrence(ics, row("gcal:me:e1", UID, 60 + 24 * 60, 90 + 24 * 60, ZOOM_WEEKLY))).toBe(false);
+    expect(isTwinOccurrence(ics, ics)).toBe(false);
+    expect(isTwinOccurrence(ics, row("gcal:me:e1", UID, 60, 90, null))).toBe(true);
+    // One UID reused for another meeting (a broken feed): the links differ.
+    expect(isTwinOccurrence(ics, row(`${UID}#b`, UID, 75, 90, "https://zoom.us/j/81234567111"))).toBe(false);
+    // A copy with its own UID: the same Zoom meeting at the same time.
+    expect(isTwinOccurrence(row("a", "u1", 60, 75, room), row("b", "u2", 60, 75, `${room}?pwd=x`))).toBe(true);
+    // Back-to-back (or overlapping) events in a personal room are separate meetings.
+    expect(isTwinOccurrence(row("a", "u1", 60, 75, room), row("b", "u2", 75, 165, room))).toBe(false);
+    expect(isTwinOccurrence(row("a", "u1", 60, 75, room), row("b", "u2", 60, 150, room))).toBe(false);
+    expect(isTwinOccurrence(row("a", "u1", 60, 75, room), row("b", "u2", 60, 75, "https://zoom.us/j/81234567778"))).toBe(false);
+    expect(isTwinOccurrence(row("a", "u1", 60, 75, null), row("b", "u2", 60, 75, null))).toBe(false);
+  });
+});
+
 describe("matchesFilter", () => {
   it("matches substrings case-insensitively and /regex/", () => {
     expect(matchesFilter("Weekly SYNC", "sync")).toBe(true);
@@ -415,7 +450,9 @@ describe("calendar through the plugin", () => {
     const off = (await harness.behavior.callRpc("meetings.get", { id: first[0]!.id })) as { meeting: { status: string; statusDetail: string } };
     expect(off.meeting).toMatchObject({ status: "cancelled", statusDetail: "Автоподключение к встречам из календаря выключено" });
 
-    await harness.behavior.setSettings({ calendarAutoJoin: true });
+    // The page's toggle: calendar.setAutoJoin writes the same setting.
+    const on = (await harness.behavior.callRpc("calendar.setAutoJoin", { autoJoin: true })) as { autoJoin: boolean };
+    expect(on.autoJoin).toBe(true);
     expect(await upcoming()).toHaveLength(4);
     await harness.behavior.setSettings({ calendarFilter: "/sync/i" });
     expect((await upcoming()).map((m) => m.title).sort()).toEqual(["Sync with US", "Weekly sync (перенос)"]);

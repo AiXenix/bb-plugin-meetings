@@ -13,6 +13,11 @@ export const CHANNEL_MEETING_SEGMENTS = "meetings.segments";
 export const CHANNEL_ENV_CHANGED = "meetings.env";
 export const CHANNEL_CALENDAR_CHANGED = "meetings.calendar";
 export const CHANNEL_ZOOM_CHANGED = "meetings.zoom";
+export const CHANNEL_GOOGLE_CHANGED = "meetings.google";
+export const CHANNEL_BOT_CHANGED = "meetings.bot";
+
+/** GOOGLE_CALLBACK_PATH in src/shared/rpc-contract.ts: the OAuth redirect route, relative to the bb origin. */
+export const GOOGLE_CALLBACK_PATH = "/api/v1/plugins/meetings/http/google/callback";
 
 // FTS snippet markers: SNIPPET_OPEN / SNIPPET_CLOSE in src/shared/rpc-contract.ts.
 export const SNIPPET_OPEN = "\u0002";
@@ -59,6 +64,14 @@ export function audioUrl(id: string, version = 0): string {
 
 export function screenshotUrl(id: string, version: number | null): string {
   return `${HTTP_BASE}/screenshot?id=${encodeURIComponent(id)}&v=${version ?? 0}`;
+}
+
+/**
+ * The frame the bot shows as its camera (avatar + name). `version` changes with the image; the name is part
+ * of the URL too, so a rename reloads the picture even if the server keeps the version.
+ */
+export function avatarPreviewUrl(version: number, botName: string): string {
+  return `${HTTP_BASE}/bot/avatar-preview?v=${version}&name=${encodeURIComponent(botName)}`;
 }
 
 export function downloadUrl(id: string, format: DownloadFormat): string {

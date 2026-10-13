@@ -88,6 +88,8 @@ describe("join", () => {
       speakerSelectors: { lagMs: { tile: 900 } },
       chromePath: CHROME,
       zoomProfileDir: fake.profile.path,
+      avatar: true,
+      avatarVideo: null,
       liveTranscription: true,
       transcriber: { gigaamUrl: GIGAAM_URL, diarization: "ui", speakerLagMs: 500, keepRawAudio: true, threads: 0 },
       createdAt: config.createdAt,
@@ -101,7 +103,7 @@ describe("join", () => {
     const meeting = await join(harness, { title: "Планёрка", botName: "Бот", maxDurationMinutes: 30 });
     expect(meeting.title).toBe("Планёрка");
     const config = botConfigSchema.parse((hostCalls(harness, "meeting.start")[0]?.input as { config: unknown }).config);
-    expect(config).toMatchObject({ botName: "Бот", maxDurationSec: 1800, zoomProfileDir: null });
+    expect(config).toMatchObject({ botName: "Бот", maxDurationSec: 1800, zoomProfileDir: null, avatar: true, avatarVideo: null });
     const detail = (await harness.behavior.callRpc("meetings.get", { id: meeting.id })) as { meeting: { maxDurationMinutes: number } };
     expect(detail.meeting.maxDurationMinutes).toBe(30);
   });

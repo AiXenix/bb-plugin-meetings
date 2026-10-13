@@ -175,6 +175,64 @@ export const calendarStatusSchema = z
   .strict();
 export type CalendarStatus = z.infer<typeof calendarStatusSchema>;
 
+export const botProfileSchema = z
+  .object({
+    /** The botName setting: the name shown in Zoom. */
+    botName: z.string(),
+    avatar: z
+      .object({
+        hasAvatar: z.boolean(),
+        /** The showAvatar setting: turn the camera on with the avatar frame. */
+        enabled: z.boolean(),
+        /** Cache-buster for GET /bot/avatar-preview?v=…; null when there is no avatar. */
+        version: z.number().nullable(),
+      })
+      .strict(),
+  })
+  .strict();
+export type BotProfile = z.infer<typeof botProfileSchema>;
+
+export const googleCalendarViewSchema = z
+  .object({
+    id: z.string(),
+    summary: z.string(),
+    primary: z.boolean(),
+    /** Watched for meetings to auto-join. */
+    selected: z.boolean(),
+    /** Google's background color, e.g. "#9fe1e7"; null when unknown. */
+    color: z.string().nullable(),
+  })
+  .strict();
+export type GoogleCalendarView = z.infer<typeof googleCalendarViewSchema>;
+
+export const googleStatusSchema = z
+  .object({
+    /** A client ID and secret are saved (settings googleClientId / googleClientSecret). */
+    configured: z.boolean(),
+    /** The client ID (not secret) for display; empty when not set. */
+    clientId: z.string(),
+    /** Path of the OAuth callback; the redirect URI is the bb origin + this path. */
+    callbackPath: z.string(),
+    connected: z.boolean(),
+    /** The Google account's email; null when not connected or unknown. */
+    email: z.string().nullable(),
+    calendars: z.array(googleCalendarViewSchema),
+    lastSyncAt: z.number().nullable(),
+    /** Last sync or token error (refresh token revoked or expired, API off …). */
+    lastError: z.string().nullable(),
+    /** Upcoming Zoom meetings found in the selected calendars (next 24 h). */
+    upcomingCount: z.number().int(),
+    /** When the current connection was made (changes only on a successful consent); null when none. */
+    connectedAt: z.number().nullable(),
+    /** Outcome of the latest consent this server started (since the plugin loaded); null when none. */
+    lastConsent: z
+      .object({ at: z.number(), ok: z.boolean(), message: z.string() })
+      .strict()
+      .nullable(),
+  })
+  .strict();
+export type GoogleStatus = z.infer<typeof googleStatusSchema>;
+
 export const zoomStatusSchema = z
   .object({
     /** The useZoomAccount setting: bots join with the signed-in profile. */
@@ -323,6 +381,50 @@ export const rpcContract = defineRpcContract({
   "zoom.loginStart": { input: z.null(), output: zoomStatusSchema },
   "zoom.loginFinish": { input: z.null(), output: zoomStatusSchema },
   "zoom.logout": { input: z.null(), output: zoomStatusSchema },
+  "bot.profile": { input: z.null(), output: botProfileSchema },
+  "bot.updateProfile": {
+    input: z
+      .object({
+        botName: z.string().trim().min(1).max(64).optional(),
+        showAvatar: z.boolean().optional(),
+      })
+      .strict(),
+    output: botProfileSchema,
+  },
+  "bot.setAvatar": {
+    input: z
+      .object({
+        /** PNG, JPEG or WebP, at most 3 MiB before base64. */
+        imageBase64: z.string().min(1).max(4_500_000),
+        mimeType: z.enum(["image/png", "image/jpeg", "image/webp"]),
+      })
+      .strict(),
+    output: botProfileSchema,
+  },
+  "bot.clearAvatar": { input: z.null(), output: botProfileSchema },
+  "google.status": { input: z.null(), output: googleStatusSchema },
+  "google.saveClient": {
+    input: z
+      .object({
+        clientId: z.string().trim().min(10).max(300),
+        /** Omit to keep the saved secret. */
+        clientSecret: z.string().trim().min(5).max(300).optional(),
+      })
+      .strict(),
+    output: googleStatusSchema,
+  },
+  "google.authStart": {
+    experimental_description:
+      "Start the OAuth consent: returns Google's authorization URL; the redirect URI is `origin` + callbackPath (register it in the Google Cloud OAuth client).",
+    input: z.object({ origin: z.string().url().max(300) }).strict(),
+    output: z.object({ authUrl: z.string(), redirectUri: z.string() }).strict(),
+  },
+  "google.setCalendars": {
+    input: z.object({ calendarIds: z.array(z.string().min(1).max(300)).max(50) }).strict(),
+    output: googleStatusSchema,
+  },
+  "google.sync": { input: z.null(), output: googleStatusSchema },
+  "google.disconnect": { input: z.null(), output: googleStatusSchema },
   "env.status": {
     input: z.null(),
     output: z
@@ -338,6 +440,11 @@ export const rpcContract = defineRpcContract({
   },
   "calendar.status": { input: z.null(), output: calendarStatusSchema },
   "calendar.sync": { input: z.null(), output: calendarStatusSchema },
+  "calendar.setAutoJoin": {
+    experimental_description: "Turn calendar auto-join on or off (the calendarAutoJoin setting, shared by Google and ICS calendars).",
+    input: z.object({ autoJoin: z.boolean() }).strict(),
+    output: calendarStatusSchema,
+  },
   "calendar.setSkip": {
     input: z.object({ key: z.string().min(1).max(600), skip: z.boolean() }).strict(),
     output: calendarStatusSchema,
@@ -351,3 +458,7 @@ export const CHANNEL_MEETING_SEGMENTS = "meetings.segments"; // payload { id, la
 export const CHANNEL_ENV_CHANGED = "meetings.env"; // payload {}
 export const CHANNEL_CALENDAR_CHANGED = "meetings.calendar"; // payload {}
 export const CHANNEL_ZOOM_CHANGED = "meetings.zoom"; // payload {}
+export const CHANNEL_GOOGLE_CHANGED = "meetings.google"; // payload {}
+export const CHANNEL_BOT_CHANGED = "meetings.bot"; // payload {}
+/** The OAuth redirect route, relative to the bb origin. */
+export const GOOGLE_CALLBACK_PATH = "/api/v1/plugins/meetings/http/google/callback";

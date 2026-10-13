@@ -152,6 +152,14 @@ export function botDetailText(detail: string | null): string | null {
   return /[а-яё]/i.test(text) ? text : null;
 }
 
+/** Calendar event keys from Google Calendar start with this (`gcal:<calendarId>:<eventId>`, DESIGN §13). */
+const GOOGLE_EVENT_KEY_PREFIX = "gcal:";
+
+/** The chip of a calendar event or calendar meeting: where it came from. */
+export function calendarSourceLabel(eventKey: string | null): string {
+  return eventKey !== null && eventKey.startsWith(GOOGLE_EVENT_KEY_PREFIX) ? "Google" : "календарь";
+}
+
 /** "Говорит" for one speaker, "Говорят" for several. */
 export function speakingLabel(count: number): string {
   return count > 1 ? "Говорят" : "Говорит";

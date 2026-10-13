@@ -3,8 +3,10 @@
 // (docs/dev/DESIGN.md §6.3): real Chrome on Xvfb, real PulseAudio + ffmpeg,
 // the Zoom adapter's join/sample/chat/leave code, speaker fusion.
 //
-// Usage: node scripts/e2e-bot-mock.mjs [profile|default|fixture|alone|stop|sigterm|all] [--keep]
+// Usage: node scripts/e2e-bot-mock.mjs [profile|default|avatar|avatar-start|fixture|alone|stop|sigterm|all] [--keep]
 //   profile  copied signed-in profile; the bot is host (its Leave popover offers "End Meeting for All")
+//   avatar   the avatar as the camera (host-rendered MJPEG, fake devices): it plays in the bot's tile, audio still recorded
+//   avatar-start  the camera starts off in the preview and again after entering: the bot turns it on both times
 //   default  built-in tone script, host ends the meeting, chat announcement
 //   fixture  .e2e/fixtures/mock-script.json (Russian speech clips) when present
 //   alone    everyone leaves; the bot leaves after aloneTimeoutSec
@@ -14,12 +16,13 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
-import { E2E, ROOT, createMeeting, ffprobeDuration, prepareRuntime, readJsonSafe, runBot } from "./dev-bot.mjs";
+import { E2E, ROOT, TEST_AVATAR_RGB, createMeeting, ffprobeDuration, prepareAvatar, prepareRuntime, readJsonSafe, runBot } from "./dev-bot.mjs";
 
 const MOCK_DIR = path.join(ROOT, "runtime", "mock-meeting");
 const FIXTURES = path.join(E2E, "fixtures");
 const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".wav": "audio/wav", ".ogg": "audio/ogg", ".mp3": "audio/mpeg" };
 const BOT_NAME = "Notetaker E2E";
+const EVIDENCE = path.join(E2E, "evidence", "avatar");
 const ANNOUNCEMENT = "Привет! Я записываю встречу (тест).";
 
 // ------------------------------------------------------------------ server
@@ -157,6 +160,7 @@ async function runScenario(name, { port, events }, options) {
     screenshotIntervalSec: 2,
     chatAnnouncement: options.chat ?? "",
     zoomProfileDir: options.zoomProfileDir ?? null,
+    avatarVideo: options.avatar ? await prepareAvatar("test", BOT_NAME) : null,
   });
   const short = config.meetingId.slice(4, 16);
   console.log(`  dir ${dir}\n  url ${url}`);
@@ -214,6 +218,12 @@ async function runScenario(name, { port, events }, options) {
   console.log(`  mock audio mode: ${mode}; utterances: ${utterances.length}; mic: ${JSON.stringify(events.find((e) => e.type === "mic") ?? null)}`);
   checks.ok(events.some((e) => e.type === "joined" && e.name === BOT_NAME), "bot typed its name and joined", events.find((e) => e.type === "joined"));
   checks.ok(events.some((e) => e.type === "joined" && e.previewMic === "Unmute"), "bot muted the mic in the preview");
+  if (!options.avatar) {
+    // The no-avatar path is unchanged: camera stopped in the preview, never on.
+    checks.ok(events.some((e) => e.type === "joined" && e.previewVideo === "Start Video"), "no avatar: bot stopped the camera in the preview");
+    checks.ok(!events.some((e) => e.type === "camera" && e.on), "no avatar: the camera never came on", events.filter((e) => e.type === "camera"));
+    checks.ok(log.some((e) => /^Camera off: /.test(e.msg)), "no avatar: the camera decision is logged");
+  }
   checks.ok(events.some((e) => e.type === "popup-dismissed"), "popup sweep dismissed the tooltip");
   if (options.chat) checks.ok(events.some((e) => e.type === "chat" && e.text === options.chat), "chat announcement posted", events.filter((e) => e.type === "chat"));
   if (options.expectLeaveClick !== false) checks.ok(events.some((e) => e.type === "left"), "bot clicked Leave → Leave Meeting");
@@ -327,6 +337,58 @@ async function waitForPhase(dir, phase, timeoutMs) {
   return false;
 }
 
+// ------------------------------------------------------------------ avatar camera
+
+/** Mean RGB of an 8x8 patch of a JPEG around (x, y). */
+function pixelAt(jpg, x, y) {
+  const crop = `crop=8:8:${Math.max(0, Math.round(x) - 4)}:${Math.max(0, Math.round(y) - 4)},scale=1:1:flags=area`;
+  const out = execFileSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-i", jpg, "-vf", crop, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]);
+  return [...out.subarray(0, 3)];
+}
+
+const near = (a, b, tol = 45) => Array.isArray(a) && a.length >= 3 && a.every((v, i) => Math.abs(v - b[i]) <= tol);
+
+/** While recording: the bot's own tile plays the avatar video, and a fresh screenshot shows it. */
+async function watchAvatar({ dir, checks, events }) {
+  checks.ok(await waitForPhase(dir, "in_meeting", 90_000), "reached in_meeting");
+  const playing = () => events.find((e) => e.type === "camera" && e.playing && e.inBotTile);
+  checks.ok(await waitFor(() => playing() !== undefined, 30_000), "the bot's camera plays in its own tile", events.filter((e) => e.type === "camera"));
+  const cam = playing();
+  if (!cam) return;
+  const shot = path.join(dir, "screen.jpg");
+  const fresh = () => fs.existsSync(shot) && fs.statSync(shot).mtimeMs > cam.t + 500;
+  checks.ok(await waitFor(fresh, 15_000), "a screenshot taken after the camera started");
+  fs.mkdirSync(EVIDENCE, { recursive: true });
+  const kept = path.join(EVIDENCE, `mock-${path.basename(dir)}.jpg`);
+  fs.copyFileSync(shot, kept);
+  const px = pixelAt(kept, cam.box.x + cam.box.w / 2, cam.box.y + cam.box.h * 0.28);
+  checks.ok(near(px, TEST_AVATAR_RGB), "the bot's screenshot shows the avatar in its tile", { px, expected: TEST_AVATAR_RGB, box: cam.box, kept });
+}
+
+/** After the run: decisions logged, Chrome's fake devices, the frame content, the fake (silent) mic. */
+function avatarAfter({ log, checks, events }) {
+  checks.ok(log.some((e) => /^Camera: the avatar video/.test(e.msg)), "the avatar camera decision is logged");
+  const args = log.find((e) => e.msg === "Chrome started")?.data?.mediaArgs ?? [];
+  checks.ok(
+    args.includes("--use-fake-device-for-media-stream") &&
+      args.some((a) => a.startsWith("--use-file-for-fake-video-capture=") && a.endsWith(".mjpeg")) &&
+      args.some((a) => a.startsWith("--use-file-for-fake-audio-capture=") && a.endsWith("silence.wav")),
+    "Chrome got the avatar video as its camera and silence.wav as its microphone",
+    args,
+  );
+  checks.ok(events.some((e) => e.type === "joined" && e.previewVideo === "Stop Video"), "the camera was on in the preview when the bot clicked Join");
+  const cam = events.find((e) => e.type === "camera" && e.playing);
+  checks.ok(cam?.width === 1280 && cam?.height === 720, "the camera is the 1280x720 avatar video", cam && { width: cam.width, height: cam.height, label: cam.label });
+  checks.ok(near(cam?.avatarColor, TEST_AVATAR_RGB), "the camera frame shows the avatar circle", cam?.avatarColor);
+  checks.ok(Array.isArray(cam?.backgroundColor) && cam.backgroundColor.every((v) => v < 80), "the camera frame has the dark background", cam?.backgroundColor);
+  checks.ok(log.some((e) => e.msg === "Camera is on (avatar)"), "the bot confirmed the camera is on after admission");
+  const cameraWarnings = log.filter((e) => e.level === "warn" && /camera/i.test(e.msg));
+  checks.ok(cameraWarnings.length === 0, "no camera warnings", cameraWarnings);
+  checks.ok(log.some((e) => /^Zoom plays the meeting to the default output/.test(e.msg)), "the bot checked that the meeting plays to the recorded (default) output");
+  const mic = events.find((e) => e.type === "mic");
+  checks.ok(/fake/i.test(mic?.label ?? ""), "the page's microphone is Chrome's fake (silent) device", mic);
+}
+
 const DEFAULT_NAMES = ["Анна Смирнова", "Борис Петров", "Вера Иванова"];
 const FAKE_PROFILE = path.join(E2E, "fake-zoom-profile");
 
@@ -360,6 +422,30 @@ const SCENARIOS = {
     chat: ANNOUNCEMENT,
     endReason: "meeting_ended",
     expectRoster: { count: 4, names: DEFAULT_NAMES },
+  },
+  avatar: {
+    // The camera takes 4 s to start (Zoom disables the button meanwhile, seen live 2026-10-13).
+    query: { end: "ended", cameraDelaySec: "4" },
+    avatar: true,
+    endReason: "meeting_ended",
+    expectRoster: { count: 4, names: DEFAULT_NAMES },
+    during: watchAvatar,
+    after: async (ctx) => avatarAfter(ctx),
+  },
+  "avatar-start": {
+    // The preview offers the camera off and the meeting starts with it off again: the bot presses Start Video both times.
+    query: { end: "ended", previewVideo: "off", joinVideo: "off" },
+    avatar: true,
+    endReason: "meeting_ended",
+    expectRoster: { count: 4, names: DEFAULT_NAMES },
+    during: watchAvatar,
+    after: async (ctx) => {
+      avatarAfter(ctx);
+      const { log, checks, events } = ctx;
+      checks.ok(log.some((e) => e.msg === "Started the camera in the preview (avatar)"), "pressed Start Video in the preview");
+      checks.ok(log.some((e) => e.msg === "Starting the camera (avatar)"), "pressed Start Video in the meeting footer");
+      checks.ok(events.some((e) => e.type === "video-button" && e.on === true), "the mock saw the footer Start Video click");
+    },
   },
   fixture: {
     query: { script: "/fixtures/mock-script.json" },

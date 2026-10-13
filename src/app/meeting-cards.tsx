@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils";
 import { screenshotUrl } from "./constants";
 import { formatDateTime, formatDuration, pluralRu } from "./format";
 import { useAsyncAction } from "./hooks";
-import { ERROR_TEXT, errorText, liveHint, speakingLabel } from "./labels";
+import { ERROR_TEXT, calendarSourceLabel, errorText, liveHint, speakingLabel } from "./labels";
 import { useMeetingsRpc } from "./rpc";
 import type { MeetingsNav } from "./route";
 import { Chip, ElapsedClock, ErrorText, RecordingDot, Spinner, StatusChip } from "./ui";
@@ -114,6 +114,18 @@ export function LiveMeetingCard({
   );
 }
 
+/** Where a calendar meeting came from: "Google" for Google Calendar, "календарь" for ICS feeds. */
+function CalendarChip({ eventKey }: { eventKey: string | null }) {
+  const label = calendarSourceLabel(eventKey);
+  return (
+    <Chip tone="neutral">
+      <Icon name="Calendar" className="size-3" aria-hidden />
+      {label}
+      {label === "Google" ? <span className="sr-only"> Календарь</span> : null}
+    </Chip>
+  );
+}
+
 function SkipToggle({ event, onCalendar }: { event: CalendarEventView; onCalendar: (status: CalendarStatus) => void }) {
   const rpc = useMeetingsRpc();
   const toggle = useAsyncAction(async (skip: boolean) => {
@@ -170,12 +182,7 @@ export function ScheduledRow({
       >
         {title}
       </button>
-      {meeting.source === "calendar" ? (
-        <Chip tone="neutral">
-          <Icon name="Calendar" className="size-3" aria-hidden />
-          календарь
-        </Chip>
-      ) : null}
+      {meeting.source === "calendar" ? <CalendarChip eventKey={event?.key ?? null} /> : null}
       {event === null ? null : <SkipToggle event={event} onCalendar={onCalendar} />}
       <Button
         type="button"
@@ -214,10 +221,7 @@ export function CalendarEventRow({
           <span className="block text-xs text-muted-foreground">Нет ссылки на Zoom — бот не подключится</span>
         ) : null}
       </span>
-      <Chip tone="neutral">
-        <Icon name="Calendar" className="size-3" aria-hidden />
-        календарь
-      </Chip>
+      <CalendarChip eventKey={event.key} />
       {event.url === null ? null : <SkipToggle event={event} onCalendar={onCalendar} />}
       {event.meetingId === null ? null : (
         <Button type="button" size="sm" variant="ghost" onClick={() => nav.toMeeting(event.meetingId!)}>

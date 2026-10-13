@@ -138,6 +138,18 @@ button {
   font-size: 40px;
   color: #aaa;
 }
+video-player {
+  position: absolute;
+  inset: 0;
+  border-radius: 7px;
+  overflow: hidden;
+}
+.mock-self-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
 .video-avatar__avatar-footer {
   position: absolute;
   left: 8px;

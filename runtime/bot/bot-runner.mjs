@@ -11,6 +11,7 @@ import path from "node:path";
 import { PcmTail, Recorder, ensurePulse, gcStalePulseModules, loadPulseModules, startXvfb, stopXvfb, unloadPulseModules } from "./lib/av.mjs";
 import { SCREEN, killChromeForProfile, killChromeForProfileSync, launchChrome, prepareProfile, resolveChromePath } from "./lib/chrome.mjs";
 import { ControlChannel } from "./lib/control.mjs";
+import { cameraPlan, fakeMediaArgs, withSilence } from "./lib/media.mjs";
 import { appendJsonl, ensureDir, readJson, stamp, writeFileAtomic, writeJsonAtomic } from "./lib/files.mjs";
 import { AloneDetector, SilenceDetector, SpeakerFusion, cleanNames, sameSet } from "./lib/fusion.mjs";
 import { BotError, StopRequested, findProcesses, killPid, sleep, sleepUnless, within } from "./lib/proc.mjs";
@@ -63,6 +64,7 @@ function validateConfig(config) {
     need(Number.isFinite(config[key]) && config[key] >= 0, key);
   }
   need(config.silenceTimeoutSec === undefined || Number.isFinite(config.silenceTimeoutSec), "silenceTimeoutSec");
+  need(config.avatarVideo === undefined || config.avatarVideo === null || typeof config.avatarVideo === "string", "avatarVideo");
   return problems;
 }
 
@@ -82,6 +84,8 @@ class BotRunner {
     this.recorder = null;
     this.profileDir = null;
     this.profileIsTemporary = true;
+    /** lib/media.mjs cameraPlan: the avatar as a fake camera, or camera off. */
+    this.camera = { camera: "off", reason: "not decided yet" };
     this.fusion = null;
     this.screenshotWanted = false;
     this.lastShotAt = 0;
@@ -285,7 +289,7 @@ class BotRunner {
 
   // ---------------------------------------------------------------- browser
 
-  async startBrowser({ pulse, profileDir, copyFrom }) {
+  async startBrowser({ pulse, profileDir, copyFrom, mediaArgs = [] }) {
     this.xvfb = await startXvfb({ ...SCREEN, log: this.log });
     this.xvfb.process.on("exit", (code, signal) => {
       if (!this.closing) this.setFatal(new BotError("browser_crashed", `Xvfb exited (${signal ?? code})`));
@@ -300,6 +304,7 @@ class BotRunner {
       display: this.xvfb.display,
       pulse,
       initScripts: [read("scheme-guard.js"), read("track-hook.js")],
+      mediaArgs,
       log: this.log,
     });
     this.context = context;
@@ -327,6 +332,7 @@ class BotRunner {
       setPhase: this.setPhase,
       dumpDebug: (tag) => this.dumpDebug(tag),
       wantScreenshot: () => this.wantScreenshot(),
+      camera: this.camera.camera,
       adapterState: {},
       joinedAt: null,
     };
@@ -343,8 +349,14 @@ class BotRunner {
     await ensurePulse(this.log);
     await gcStalePulseModules(short, this.log);
     this.pulse = await loadPulseModules(short, this.log);
+    this.camera = this.decideCamera();
     this.setPhase("starting", "Starting Chrome");
-    await this.startBrowser({ pulse: this.pulse, profileDir: this.file("chrome-profile"), copyFrom: config.zoomProfileDir ?? null });
+    await this.startBrowser({
+      pulse: this.pulse,
+      profileDir: this.file("chrome-profile"),
+      copyFrom: config.zoomProfileDir ?? null,
+      mediaArgs: fakeMediaArgs(this.camera),
+    });
     if (this.stopController.signal.aborted) throw this.fatal ?? new StopRequested();
 
     const ctx = this.makeContext();
@@ -396,6 +408,22 @@ class BotRunner {
     await this.leaveSafely(adapter, ctx);
     await this.recorder.stop();
     this.outcome = end;
+  }
+
+  /** The avatar as Chrome's fake camera (with a silent fake mic), or the camera off; logged either way. */
+  decideCamera() {
+    let plan = cameraPlan(this.config);
+    if (plan.camera === "avatar" && !plan.audio) {
+      try {
+        plan = withSilence(plan, this.dir);
+        this.log("warn", "The host's silence.wav is missing; using the bot's own silent microphone", { audio: plan.audio });
+      } catch (error) {
+        plan = { camera: "off", reason: `cannot write a silent microphone file: ${error.message}` };
+      }
+    }
+    if (plan.camera === "avatar") this.log("info", "Camera: the avatar video (fake camera, silent fake microphone)", { video: plan.video, audio: plan.audio });
+    else this.log("info", `Camera off: ${plan.reason}`);
+    return plan;
   }
 
   async leaveSafely(adapter, ctx) {
@@ -679,6 +707,7 @@ class BotRunner {
       await stopXvfb(this.xvfb);
       if (this.pulse) await unloadPulseModules(this.pulse.modules, this.log);
       if (this.profileDir && this.profileIsTemporary) fs.rmSync(this.profileDir, { recursive: true, force: true, maxRetries: 3 });
+      if (this.camera.ownSilence) fs.rmSync(this.camera.audio, { force: true });
     } catch (error) {
       this.log("warn", "Cleanup problem", { error: error.message });
     }

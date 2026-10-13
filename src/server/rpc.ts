@@ -55,11 +55,30 @@ export function registerRpc(bb: BbPluginApi, service: MeetingsService): void {
     "zoom.loginFinish": () => service.zoom.loginFinish(),
     "zoom.logout": () => service.zoom.logout(),
 
+    "bot.profile": () => service.bot.profile(),
+    "bot.updateProfile": (input) => {
+      const patch: { botName?: string; showAvatar?: boolean } = {};
+      if (input.botName !== undefined) patch.botName = input.botName;
+      if (input.showAvatar !== undefined) patch.showAvatar = input.showAvatar;
+      return service.bot.updateProfile(patch);
+    },
+    // The image type is taken from the bytes; the declared mimeType is only a hint.
+    "bot.setAvatar": ({ imageBase64 }) => service.bot.setAvatar(imageBase64),
+    "bot.clearAvatar": () => service.bot.clearAvatar(),
+
+    "google.status": () => service.google.status(),
+    "google.saveClient": ({ clientId, clientSecret }) => service.google.saveClient(clientId, clientSecret),
+    "google.authStart": ({ origin }) => service.google.authStart(origin),
+    "google.setCalendars": ({ calendarIds }) => service.google.setCalendars(calendarIds),
+    "google.sync": () => service.google.sync(),
+    "google.disconnect": () => service.google.disconnect(),
+
     "env.status": () => service.envStatus(),
     "env.setup": async (input) => ({ env: await service.envSetup(input?.force ?? false) }),
 
     "calendar.status": () => service.calendar.status(),
     "calendar.sync": () => service.calendar.sync(),
+    "calendar.setAutoJoin": ({ autoJoin }) => service.calendar.setAutoJoin(autoJoin),
     "calendar.setSkip": ({ key, skip }) => service.calendar.setSkip(key, skip),
   });
 }

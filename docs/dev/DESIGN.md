@@ -695,3 +695,108 @@ events in the window, deduped by `uid + occurrence start`. Cancelled
   server end to end.
 * Live Zoom probe: join flow against the real Zoom web client up to the
   invalid-meeting error; a real meeting needs a human-provided link.
+
+## 13. Google Calendar over OAuth (auto-join)
+
+A second calendar source next to the ICS feeds (§10); both feed the same
+`calendar_events` table and the same `applyAutoJoin` scheduling rules
+(lead minutes, filter, skip toggles, reschedule/cancel on change).
+
+* **Credentials.** The user creates an OAuth client (type *Web application*)
+  in Google Cloud: Calendar API enabled, consent screen with their own
+  account as a test user (or published). Settings `googleClientId` (string)
+  and `googleClientSecret` (secret) — editable from the Meetings page
+  (`google.saveClient`), the secret never reaches the frontend.
+* **Redirect URI** = the bb origin the page runs on + `GOOGLE_CALLBACK_PATH`
+  (`/api/v1/plugins/meetings/http/google/callback`). The page passes
+  `window.location.origin` to `google.authStart`; the server accepts only
+  `https://…` or `http://localhost|127.0.0.1[:port]` origins. The UI shows the
+  exact URI to register.
+* **Flow.** `google.authStart` → authorization-code flow with PKCE (S256),
+  `access_type=offline`, `prompt=consent`, `include_granted_scopes=true`,
+  scopes `openid email https://www.googleapis.com/auth/calendar.readonly`,
+  a random `state` kept in memory for 15 min with its verifier and
+  redirect URI. `GET /google/callback?code&state` (default `local` auth: a
+  top-level navigation has no Origin header) validates state, exchanges the
+  code at `https://oauth2.googleapis.com/token`, reads the email from
+  `https://openidconnect.googleapis.com/v1/userinfo`, stores tokens, selects
+  the primary calendar, starts a sync, publishes `meetings.google`, and
+  answers a small Russian HTML page ("Google Календарь подключён — можно
+  закрыть вкладку" + link back to `/plugins/meetings/meetings`). Errors
+  (`error=access_denied`, bad state, token failure) render the same page with
+  the reason. Endpoints are injectable for tests (fake Google server).
+* **Storage.** Plugin SQLite table `google_auth` (single row: refresh token,
+  access token, expiry, email, scope, connected_at) and the selected
+  calendar ids. Access tokens are refreshed on demand (60 s skew); an
+  `invalid_grant` marks the connection broken (`lastError`: "Доступ к Google
+  отозван или истёк — подключите заново"; note Google expires refresh tokens
+  after 7 days while the consent screen is in *Testing*). `google.disconnect`
+  revokes (`https://oauth2.googleapis.com/revoke`) and deletes tokens, and
+  cancels still-scheduled bots that came from Google.
+* **Sync** (with the ICS sync, every `calendarSyncMinutes`, and on
+  `google.sync`): `users/me/calendarList` (≤ 250) for the picker, then for
+  each selected calendar `calendars/{id}/events?singleEvents=true&orderBy=startTime&timeMin&timeMax&maxResults=250`
+  over the sync window. Skip `status=cancelled`, `eventType` other than
+  `default`, events the user declined (`attendees[].self && responseStatus=="declined"`),
+  all-day events. Zoom link from `conferenceData.entryPoints[].uri`, then
+  `location`, then `description` (HTML stripped) via `extractMeetingUrls`.
+  Occurrence key `gcal:<calendarId>:<eventId>` (singleEvents gives each
+  recurrence instance its own id), feed id `gcal:<sha12(calendarId)>`.
+  Google rate/5xx errors keep the last known events (no mass cancel).
+* **Leaving.** Calendar meetings already leave when the host ends the call,
+  when the bot is alone (`aloneTimeoutMinutes`) or silent. In addition,
+  their `maxDurationMinutes` is capped at the event length +
+  `calendarOvertimeMinutes` (new setting, default 60, 0 = no cap).
+* `calendar.status.upcoming` lists events of both sources;
+  `google.status.upcomingCount` counts Google ones with a Zoom link.
+
+## 14. Bot name and avatar
+
+* **Name**: the existing `botName` setting, editable on the Meetings page
+  (`bot.updateProfile`). Per-join overrides (`meetings_join botName`) still win.
+* **Avatar**: an image uploaded on the page (`bot.setAvatar`, PNG/JPEG/WebP
+  ≤ 3 MiB) is stored on the recording host by `bot.avatar` as a square PNG
+  (`<hostData>/bot/avatar.png`, center-cropped, 512 px). Setting
+  `showAvatar` (boolean, default true) turns it on.
+* **Rendering**: at `meeting.start`, when `config.avatar` is true and an
+  avatar exists, the host renders `<hostData>/bot/render/<sha12(name+avatar)>.mjpeg`
+  with ffmpeg: 1280x720, dark background, the avatar as a circle (≈ 320 px)
+  centered above the bot name (white, DejaVu/Liberation Sans), ~2 s at 5 fps
+  (Chrome loops the file), plus a 1 s silent 48 kHz WAV for the fake mic.
+  It sets `config.avatarVideo` to the MJPEG path before writing config.json.
+  `bot.avatarPreview` renders the same frame as a JPEG for the page.
+* **Bot**: with `avatarVideo` set, Chrome gets
+  `--use-fake-device-for-media-stream --use-file-for-fake-video-capture=<mjpeg>
+  --use-file-for-fake-audio-capture=<silence.wav>` (the fake mic replaces the
+  PulseAudio remap source; recording still captures PulseAudio output), the
+  preview keeps video ON, and after admission the bot makes sure the camera
+  is on (`Start Video`) and the mic stays muted. Without an avatar the camera
+  stays off as before. The mock meeting page shows the bot's camera in its tile.
+
+### 13.1 / 14.1 Implementation notes (as built)
+
+* Settings: `showAvatar` (after `botName`), `calendarOvertimeMinutes`
+  (after `calendarLeadMinutes`, 0–600, default 60), `googleClientId`,
+  `googleClientSecret` (secret). Changing the Client ID while connected
+  revokes the token and asks to reconnect.
+* Table `google_auth` (migration 9): tokens, expiry, email, scope,
+  connected_at, selected and cached calendars, last sync and error.
+* RPC `calendar.setAutoJoin {autoJoin}` writes `calendarAutoJoin` (the page
+  toggle). CLI: `google [status]`, `google sync`, `google disconnect`, `bot
+  [--name] [--show-avatar on|off] [--avatar <path on the bb server>]
+  [--clear-avatar]`. The api `calendar` action adds a per-event `source` and a
+  `google` summary.
+* HTTP: `GET /google/callback`, `GET /bot/avatar-preview?v=` (renders with the
+  saved botName; the page appends `&name=` only as a cache-buster).
+* An occurrence gets no bot when another scheduled or live bot for the same
+  Zoom meeting is within 30 min (same event in two calendars / ICS + Google /
+  a manual bot). Deselected or vanished Google calendars cancel their bots.
+* Avatar on the bot: with fake devices Chrome lists "Fake Default Audio
+  Output" plus extra fake outputs; only "default" reaches PulseAudio, and
+  Zoom picks it on a fresh profile (the bot logs Zoom's speaker choice and
+  warns otherwise). `silence.wav` is mandatory (the fake mic beeps
+  otherwise); the bot derives it from `<dir(dir(avatarVideo))>/silence.wav`,
+  else writes `fake-mic.wav` into the meeting dir. Zoom's in-meeting camera
+  button reads "stop my video"/"start my video" and is briefly disabled while
+  the camera starts; the bot's self-view is mirrored (others see it
+  unmirrored). The camera's device label in Zoom is the .mjpeg path.

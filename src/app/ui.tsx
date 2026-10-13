@@ -305,7 +305,11 @@ export function DisclosureButton({
   );
 }
 
-/** Confirmation dialog for destructive or slow actions; the caller closes it via `onOpenChange`. */
+/**
+ * Confirmation dialog for destructive or slow actions; the caller closes it via `onOpenChange`.
+ * While `pending` it stays open (Escape, an outside click and the close button are ignored),
+ * so the outcome of the running action, an error included, is not lost in a closed dialog.
+ */
 export function ConfirmDialog({
   open,
   onOpenChange,
@@ -328,7 +332,13 @@ export function ConfirmDialog({
   onConfirm: () => void;
 }) {
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next && pending) return;
+        onOpenChange(next);
+      }}
+    >
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>

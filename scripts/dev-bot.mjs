@@ -4,10 +4,14 @@
 //      (the host layout: <runtime>/bot/*.mjs + <runtime>/node_modules),
 //   2. creates .e2e/meetings/<id>/config.json for a link,
 //   3. runs bot-runner.mjs detached with stdout/stderr in bot.log, echoing it.
+// --avatar <image> stores the image as the avatar of a dev host data dir
+// (.e2e/hostdata) and renders the camera video with the host's own code
+// (src/host/avatar.ts), like meeting.start does (DESIGN §14); --avatar test
+// uses a generated image.
 //
 // Usage: node scripts/dev-bot.mjs <url> [--name Notetaker] [--alone 120] [--waiting 600]
 //          [--max 3600] [--silence 0] [--shots 5] [--chat "text"] [--mode meeting|login]
-//          [--profile <dir>] [--selectors '<json>'] [--id-prefix dev] [--quiet]
+//          [--profile <dir>] [--selectors '<json>'] [--avatar <image>|test] [--id-prefix dev] [--quiet]
 // Ctrl+C sends SIGTERM to the bot (graceful leave).
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -20,6 +24,10 @@ export const E2E = path.join(ROOT, ".e2e");
 export const RUNTIME = path.join(E2E, "runtime");
 export const MEETINGS = path.join(E2E, "meetings");
 export const PLAYWRIGHT_VERSION = "1.64.0";
+/** Host data dir of the dev harness (avatar, renders). */
+export const DEV_HOST_DATA = path.join(E2E, "hostdata");
+/** The generated test avatar's fill color (RGB), for e2e color checks. */
+export const TEST_AVATAR_RGB = [255, 122, 26];
 
 /** Copy runtime/ into .e2e/runtime (keeping its node_modules) and install playwright-core once. */
 export function prepareRuntime({ quiet = false } = {}) {
@@ -47,6 +55,58 @@ export function prepareRuntime({ quiet = false } = {}) {
     });
   }
   return RUNTIME;
+}
+
+let hostHooks = false;
+
+/**
+ * Import a host module (src/host/<name>.ts) under Node's type stripping:
+ * src/ uses ".js" specifiers (bundler style), so a resolve hook maps them to
+ * the .ts sources, like scripts/dev-host-setup.mts.
+ */
+export async function importHost(name) {
+  if (!hostHooks) {
+    const { registerHooks } = await import("node:module");
+    registerHooks({
+      resolve(specifier, context, nextResolve) {
+        try {
+          return nextResolve(specifier, context);
+        } catch (error) {
+          if (/^\.{1,2}\//.test(specifier) && specifier.endsWith(".js")) return nextResolve(`${specifier.slice(0, -3)}.ts`, context);
+          throw error;
+        }
+      },
+    });
+    hostHooks = true;
+  }
+  return import(path.join(ROOT, "src", "host", name));
+}
+
+/** A test avatar: an orange square with white initials (600x600 PNG). */
+export function makeTestAvatar(file, initials = "NT") {
+  const [r, g, b] = TEST_AVATAR_RGB.map((v) => v.toString(16).padStart(2, "0"));
+  const font = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"].find((f) => fs.existsSync(f));
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const text = font ? `,drawtext=fontfile=${font}:text=${initials}:fontcolor=white:fontsize=220:x=(w-text_w)/2:y=(h-text_h)/2` : "";
+  execFileSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", `color=c=0x${r}${g}${b}:s=600x600${text}`, "-frames:v", "1", file]);
+  return file;
+}
+
+/**
+ * Store `image` as the avatar of `dataDir` and render the camera video for
+ * `botName` with the host's code (src/host/avatar.ts). Returns the .mjpeg path.
+ */
+export async function prepareAvatar(image, botName, { dataDir = DEV_HOST_DATA } = {}) {
+  const { hostPaths } = await importHost("paths.ts");
+  const avatar = await importHost("avatar.ts");
+  const paths = hostPaths(dataDir);
+  const source = image === "test" ? makeTestAvatar(path.join(E2E, "tmp", "test-avatar.png")) : path.resolve(image);
+  const bytes = fs.readFileSync(source);
+  const mime = { png: "image/png", jpeg: "image/jpeg", webp: "image/webp" }[avatar.sniffImage(bytes)] ?? "image/png";
+  await avatar.setAvatar(paths, bytes.toString("base64"), mime);
+  const video = await avatar.renderAvatarVideo(paths, botName);
+  if (!video) throw new Error("the avatar video was not rendered");
+  return video;
 }
 
 export function newMeetingId(prefix = "dev") {
@@ -84,6 +144,8 @@ export async function createMeeting(url, options = {}) {
     speakerSelectors: options.speakerSelectors ?? null,
     chromePath: options.chromePath ?? "/usr/bin/google-chrome-stable",
     zoomProfileDir: options.zoomProfileDir ?? null,
+    avatar: options.avatarVideo != null,
+    avatarVideo: options.avatarVideo ?? null,
     liveTranscription: false,
     transcriber: { gigaamUrl: null, diarization: "ui+acoustic", speakerLagMs: 700, keepRawAudio: true, threads: 0 },
     createdAt: Date.now(),
@@ -188,6 +250,9 @@ function parseCli(argv) {
       case "--selectors":
         options.speakerSelectors = JSON.parse(next());
         break;
+      case "--avatar":
+        options.avatarImage = next();
+        break;
       case "--id-prefix":
         options.idPrefix = next();
         break;
@@ -207,6 +272,10 @@ function parseCli(argv) {
 async function main() {
   const { url, options } = parseCli(process.argv.slice(2));
   prepareRuntime({ quiet: options.quiet });
+  if (options.avatarImage) {
+    options.avatarVideo = await prepareAvatar(options.avatarImage, options.botName ?? "Notetaker");
+    console.log(`avatar video: ${options.avatarVideo}`);
+  }
   const { dir, config } = await createMeeting(url, options);
   console.log(`meeting dir: ${dir}\njoinUrl: ${config.joinUrl}`);
   const { child, exited } = runBot(dir, { echo: !options.quiet });

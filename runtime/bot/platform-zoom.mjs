@@ -4,6 +4,7 @@
 // Playwright input where Zoom needs real events (name keystrokes, Join).
 import fs from "node:fs";
 import { xdotoolKey } from "./lib/av.mjs";
+import { videoIsOn } from "./lib/media.mjs";
 import { BotError, StopRequested, sleep, sleepUnless } from "./lib/proc.mjs";
 
 const PAGE_SOURCE = fs.readFileSync(new URL("./page/zoom-page.js", import.meta.url), "utf8").trim();
@@ -392,19 +393,138 @@ export async function joinFlow(ctx, { launchPage } = {}) {
   await afterAdmission(ctx);
 }
 
-/** Mute the mic and stop the camera on the pre-join screen. */
-async function previewDevices(ctx, frame, prejoin) {
+/** True when the bot shows its avatar as the camera (bot-runner sets ctx.camera from lib/media.mjs cameraPlan). */
+const avatarCamera = (ctx) => ctx.camera === "avatar";
+
+/**
+ * Mute the mic on the pre-join screen. The camera: off without an avatar;
+ * with one it stays on ("Start Video" is clicked when Zoom offers it off).
+ */
+export async function previewDevices(ctx, frame, prejoin) {
+  const clickPreview = (id) => frame.locator(`#${id}`).click({ timeout: 3_000 }).catch(() => tryOp(ctx, frame, { op: "click", selectors: [`#${id}`] }));
   if (prejoin.mic && /^mute$/i.test(prejoin.mic)) {
-    await frame.locator("#preview-audio-control-button").click({ timeout: 3_000 }).catch(() => tryOp(ctx, frame, { op: "click", selectors: ["#preview-audio-control-button"] }));
+    await clickPreview("preview-audio-control-button");
     ctx.log("info", "Muted the microphone in the preview");
   }
+  if (avatarCamera(ctx)) {
+    if (prejoin.video && /^start video$/i.test(prejoin.video)) {
+      await clickPreview("preview-video-control-button");
+      ctx.log("info", "Started the camera in the preview (avatar)");
+    } else {
+      ctx.log("info", "Keeping the camera on in the preview (avatar)", { video: prejoin.video ?? null });
+    }
+    return;
+  }
   if (prejoin.video && /^stop video$/i.test(prejoin.video)) {
-    await frame.locator("#preview-video-control-button").click({ timeout: 3_000 }).catch(() => tryOp(ctx, frame, { op: "click", selectors: ["#preview-video-control-button"] }));
+    await clickPreview("preview-video-control-button");
     ctx.log("info", "Stopped the camera in the preview");
   }
 }
 
-/** After admission: make sure computer audio is joined (else nothing is recorded), re-mute, camera off, popups. */
+/** Clicks on a camera button that stays off before giving up. */
+const MAX_VIDEO_CLICKS = 4;
+/**
+ * How long after joining the sampler keeps checking an avatar camera that is
+ * not on yet (footer loaded late, slow camera start): one check per audio
+ * check, then a warning.
+ */
+const VIDEO_GRACE_MS = 120_000;
+/** How often the sampler re-reads Zoom's speaker choice while the avatar camera (fake devices) is used. */
+const SPEAKER_CHECK_MS = 60_000;
+
+/** Warn once that the avatar camera is not known to be on (`last`: the last button state read). */
+function warnCameraNotOn(ctx, last) {
+  const st = ctx.adapterState;
+  if (st.videoWarned) return;
+  st.videoWarned = true;
+  const state = last?.found ? videoIsOn(last) : null;
+  ctx.log("warn", state === false ? "The camera did not turn on; the avatar may not be shown" : "Could not tell whether the camera is on", {
+    found: !!last?.found,
+    label: last?.label ?? null,
+    icon: last?.icon ?? null,
+    disabled: !!last?.disabled,
+  });
+}
+
+/**
+ * Turn the avatar camera on: read the footer button, click it only when it is
+ * known to be off (an unknown state is never toggled); a later check confirms.
+ * Returns true (on), false (off or not allowed) or null (unknown). Once the
+ * camera was on, a later "off" is left alone: the host (or the user through
+ * remote control) turned it off. `checks` reads `pauseMs` apart, with no pause
+ * after the last; with `warn` a camera still not on afterwards is logged once.
+ * The bot itself makes single checks: before the recorder starts
+ * (afterAdmission) and from the sampler (ensureAudio), both of which wait.
+ */
+export async function ensureVideo(ctx, { checks = 1, pauseMs = 1_500, warn = true } = {}) {
+  const st = ctx.adapterState;
+  let last = null;
+  for (let i = 0; i < checks && !ctx.signal.aborted; i += 1) {
+    if (i > 0) await sleepUnless(pauseMs, ctx.signal);
+    const frame = zoomFrame(ctx.page);
+    const button = await tryOp(ctx, frame, { op: "video", action: "state" }, 4_000);
+    last = button;
+    st.videoLast = button;
+    const on = button?.found ? videoIsOn(button) : null;
+    if (on === true) {
+      if (st.videoOn !== true) ctx.log("info", "Camera is on (avatar)", { label: button.label, icon: button.icon });
+      st.videoOn = true;
+      return true;
+    }
+    if (button?.found && /disallowed/i.test(button.icon)) {
+      if (st.videoOn !== false) ctx.log("warn", "Zoom does not let the bot start its camera; the avatar is not shown", { label: button.label, icon: button.icon });
+      st.videoOn = false;
+      return false;
+    }
+    // Zoom disables the button for a moment while the camera is starting (measured right after admission).
+    if (on === false && !button.disabled) {
+      if (st.videoOn === true) {
+        if (!st.videoOffLogged) ctx.log("info", "The camera was turned off in the meeting; leaving it off", { label: button.label });
+        st.videoOffLogged = true;
+        return false;
+      }
+      if ((st.videoClicks ?? 0) >= MAX_VIDEO_CLICKS) {
+        ctx.log("warn", `The camera stayed off after ${st.videoClicks} clicks; giving up, the avatar is not shown`, { label: button.label, icon: button.icon });
+        st.videoOn = false;
+        return false;
+      }
+      const clicked = await tryOp(ctx, frame, { op: "video", action: "click" }, 4_000);
+      st.videoClicks = (st.videoClicks ?? 0) + 1;
+      ctx.log("info", "Starting the camera (avatar)", { label: button.label, icon: button.icon, clicked: !!clicked?.clicked, attempt: st.videoClicks });
+    }
+  }
+  if (warn) warnCameraNotOn(ctx, last);
+  return last?.found ? videoIsOn(last) : null;
+}
+
+/**
+ * With Chrome's fake devices only the "default" output reaches PulseAudio
+ * (setSinkId to "Fake Audio Output 1/2" plays into nothing). Zoom picks
+ * "default" on a fresh profile (measured 2026-10-13). Logs the choice the
+ * first time and whenever it changes (a warning for any non-default output);
+ * the sampler re-reads it every SPEAKER_CHECK_MS. Returns the device id or null.
+ */
+export async function checkSpeaker(ctx) {
+  const st = ctx.adapterState;
+  const report = await tryOp(ctx, zoomFrame(ctx.page), { op: "store" }, 6_000);
+  const speaker = report?.devices?.activeSpeaker ?? null;
+  const id = typeof speaker === "string" ? speaker : (speaker?.deviceId ?? null);
+  if (id === null) {
+    if (!st.speakerUnreadLogged) ctx.log("info", "Could not read Zoom's speaker choice", { found: !!report?.found });
+    st.speakerUnreadLogged = true;
+    return null;
+  }
+  const recorded = id === "" || id === "default";
+  if (st.speakerId !== id) {
+    const label = (report.devices.speakers ?? []).find((d) => d && d.deviceId === id)?.label ?? null;
+    if (recorded) ctx.log("info", "Zoom plays the meeting to the default output (recorded)", { speaker: label ?? id });
+    else ctx.log("warn", "Zoom plays the meeting to a non-default output; with the avatar camera only the default output is recorded", { speaker: label ?? id });
+  }
+  st.speakerId = id;
+  return id;
+}
+
+/** After admission: make sure computer audio is joined (else nothing is recorded), re-mute, camera (off, or on with the avatar), popups. */
 async function afterAdmission(ctx) {
   const deadline = Date.now() + 30_000;
   let state = null;
@@ -426,10 +546,35 @@ async function afterAdmission(ctx) {
     state = await tryOp(ctx, zoomFrame(ctx.page), { op: "audio", action: "state" });
   }
   if (state?.muted) ctx.log("info", "Microphone muted");
-  const video = await tryOp(ctx, zoomFrame(ctx.page), { op: "audio", action: "videoOff" });
-  if (video?.clicked) ctx.log("info", "Camera stopped");
+  if (avatarCamera(ctx)) {
+    // One check (and at most one click), no waiting: the recorder starts only after this
+    // returns. The sampler confirms the camera and reads the speaker choice (ensureAudio).
+    await ensureVideo(ctx, { warn: false });
+  } else {
+    const video = await tryOp(ctx, zoomFrame(ctx.page), { op: "audio", action: "videoOff" });
+    if (video?.clicked) ctx.log("info", "Camera stopped");
+  }
   const swept = await tryOp(ctx, zoomFrame(ctx.page), { op: "sweep" });
   if (swept?.length) ctx.log("info", "Dismissed popups", { clicked: swept });
+}
+
+/**
+ * The avatar camera while recording (each audio check; the sampler waits, so
+ * nothing here pauses): one camera check until it is on or VIDEO_GRACE_MS
+ * after joining (then a warning if it never came on), and Zoom's speaker
+ * choice every SPEAKER_CHECK_MS.
+ */
+export async function avatarChecks(ctx) {
+  const st = ctx.adapterState;
+  const now = Date.now();
+  if (st.videoOn === undefined && !st.videoWarned) {
+    if (now - (ctx.joinedAt ?? now) < VIDEO_GRACE_MS) await ensureVideo(ctx, { warn: false });
+    else warnCameraNotOn(ctx, st.videoLast ?? null);
+  }
+  if (now - (st.speakerCheckedAt ?? -Infinity) >= SPEAKER_CHECK_MS) {
+    st.speakerCheckedAt = now;
+    await checkSpeaker(ctx);
+  }
 }
 
 /**
@@ -440,6 +585,7 @@ async function afterAdmission(ctx) {
  */
 export async function ensureAudio(ctx) {
   const st = ctx.adapterState;
+  if (avatarCamera(ctx)) await avatarChecks(ctx);
   const frame = zoomFrame(ctx.page);
   const state = await tryOp(ctx, frame, { op: "audio", action: "join" }, 4_000);
   if (state === null) return null;

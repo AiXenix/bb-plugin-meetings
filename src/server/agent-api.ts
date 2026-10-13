@@ -277,14 +277,27 @@ export async function runAgentRequest(service: MeetingsService, request: AgentRe
     }
     case "calendar": {
       const status = await service.calendar.status();
+      const google = await service.google.status();
+      const watched = google.calendars.filter((calendar) => calendar.selected);
       return {
         ...status,
         upcoming: status.upcoming.map((event) => ({
           ...event,
+          source: event.key.startsWith("gcal:") ? "google" : "ics",
           url: event.url === null ? null : maskMeetingUrl(event.url),
           startsAt: iso(event.startsAt),
           endsAt: iso(event.endsAt),
         })),
+        // Connecting needs a browser (the Meetings page); agents only report the state.
+        google: {
+          configured: google.configured,
+          connected: google.connected,
+          email: google.email,
+          watchedCalendars: watched.slice(0, 50).map((calendar) => calendar.summary),
+          lastSyncAt: iso(google.lastSyncAt),
+          lastError: google.lastError,
+          upcomingCount: google.upcomingCount,
+        },
       };
     }
   }

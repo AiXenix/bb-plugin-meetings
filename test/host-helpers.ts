@@ -171,6 +171,8 @@ export function botConfig(meetingId: string, overrides: Partial<BotConfig> = {})
     speakerSelectors: null,
     chromePath: "/usr/bin/google-chrome-stable",
     zoomProfileDir: null,
+    avatar: false,
+    avatarVideo: null,
     liveTranscription: true,
     transcriber: { gigaamUrl: "http://127.0.0.1:1", diarization: "ui+acoustic", speakerLagMs: 700, keepRawAudio: false, threads: 2 },
     createdAt: Date.now(),

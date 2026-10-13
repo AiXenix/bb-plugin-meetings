@@ -31,7 +31,9 @@ describe("registrations", () => {
     expect([...r.rpcMethods].sort()).toEqual(Object.keys(rpcContract).sort());
     expect(r.httpRoutes.map((route) => `${route.method} ${route.path}`).sort()).toEqual([
       "GET /audio",
+      "GET /bot/avatar-preview",
       "GET /download",
+      "GET /google/callback",
       "GET /mock-meeting/index.html",
       "GET /mock-meeting/mock.css",
       "GET /mock-meeting/mock.js",
@@ -45,6 +47,7 @@ describe("registrations", () => {
     expect(r.cli?.commands.map((c) => c.name).sort()).toEqual(
       [
         "api",
+        "bot",
         "calendar",
         "calendar-skip",
         "calendar-sync",
@@ -53,6 +56,9 @@ describe("registrations", () => {
         "debug-dump",
         "delete",
         "doctor",
+        "google",
+        "google-disconnect",
+        "google-sync",
         "import",
         "join",
         "list",
@@ -86,6 +92,7 @@ describe("registrations", () => {
     expect(joinTool.presentation?.label?.pending).toBe("Отправляю бота на встречу");
     expect(Object.keys(r.settingsDescriptors)).toEqual([
       "botName",
+      "showAvatar",
       "maxDurationMinutes",
       "aloneTimeoutMinutes",
       "waitingTimeoutMinutes",
@@ -106,8 +113,11 @@ describe("registrations", () => {
       "calendarIcsUrls",
       "calendarAutoJoin",
       "calendarLeadMinutes",
+      "calendarOvertimeMinutes",
       "calendarFilter",
       "calendarSyncMinutes",
+      "googleClientId",
+      "googleClientSecret",
     ]);
   });
 
@@ -118,6 +128,11 @@ describe("registrations", () => {
     await expect(harness.behavior.setSettings({ calendarIcsUrls: "ftp://x" })).rejects.toThrow();
     await expect(harness.behavior.setSettings({ calendarIcsUrls: "https://cal.example.com:99999/secret.ics" })).rejects.toThrow();
     await harness.behavior.setSettings({ speakerSelectors: '{"tile":[".x"]}', calendarIcsUrls: "https://a/b.ics webcal://c/d.ics" });
+    await expect(harness.behavior.setSettings({ calendarOvertimeMinutes: 601 })).rejects.toThrow();
+    await expect(harness.behavior.setSettings({ calendarOvertimeMinutes: 1.5 })).rejects.toThrow();
+    await expect(harness.behavior.setSettings({ googleClientId: "id with spaces" })).rejects.toThrow();
+    await expect(harness.behavior.setSettings({ googleClientSecret: "x".repeat(301) })).rejects.toThrow();
+    await harness.behavior.setSettings({ calendarOvertimeMinutes: 0, googleClientId: "1234-abc.apps.googleusercontent.com", googleClientSecret: "GOCSPX-secret" });
   });
 });
 

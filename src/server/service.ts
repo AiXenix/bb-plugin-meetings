@@ -33,6 +33,7 @@ import {
   type Segment,
   type TranscriberConfig,
 } from "../shared/runtime-files.js";
+import { BotProfileService } from "./bot-profile.js";
 import { fetchIcs } from "./calendar.js";
 import { CalendarService } from "./calendar-service.js";
 import {
@@ -47,6 +48,8 @@ import {
 } from "./db.js";
 import { MeetingsError, errorMessage, notFound, sleep } from "./errors.js";
 import type { FormatMeeting } from "./format.js";
+import type { GoogleEndpoints } from "./google-auth.js";
+import { GoogleService } from "./google-service.js";
 import { notificationText } from "./notify.js";
 import { parseSpeakerSelectors, type MeetingsSettings, type SettingsHandle } from "./settings.js";
 import { describeStatus, mapRuntime, type MappedStatus } from "./status.js";
@@ -81,6 +84,8 @@ export interface ServiceOptions {
   /** Poll interval while waiting for a join outcome. */
   readonly joinPollMs?: number;
   readonly fetchText?: (url: string, signal?: AbortSignal) => Promise<string>;
+  /** Google OAuth and Calendar API endpoints (tests point them at a fake Google). */
+  readonly googleEndpoints?: Partial<GoogleEndpoints>;
 }
 
 export interface JoinRequest {
@@ -111,7 +116,9 @@ export class MeetingsService {
   readonly now: () => number;
   private readonly joinPollMs: number;
   readonly zoom: ZoomAccount;
+  readonly google: GoogleService;
   readonly calendar: CalendarService;
+  readonly bot: BotProfileService;
   private envCache: { at: number; report: EnvReport } | null = null;
   private autoSetupAt = 0;
   private readonly locks = new Map<string, Promise<unknown>>();
@@ -140,7 +147,9 @@ export class MeetingsService {
     this.now = options.now ?? Date.now;
     this.joinPollMs = options.joinPollMs ?? 2_000;
     this.zoom = new ZoomAccount(bb, settings, this);
+    this.google = new GoogleService(bb, settings, repo, this, options.googleEndpoints);
     this.calendar = new CalendarService(bb, settings, repo, this, options.fetchText ?? fetchIcs);
+    this.bot = new BotProfileService(bb, settings, this);
   }
 
   // ---------- plumbing ----------
@@ -285,7 +294,7 @@ export class MeetingsService {
       participants: row.participants,
       summaryMd: row.summaryMd,
       speakerNames: row.speakerNames,
-      maxDurationMinutes: row.options.maxDurationMinutes ?? settings.maxDurationMinutes,
+      maxDurationMinutes: this.maxDurationMinutes(row, settings),
       calendarEventKey: row.calendarKey,
     };
   }
@@ -550,6 +559,25 @@ export class MeetingsService {
     return report.chromePath;
   }
 
+  /**
+   * The meeting's hard stop: its own override or the setting; a calendar
+   * meeting also leaves at most calendarOvertimeMinutes after its event's
+   * planned length (DESIGN §13 "Leaving"; 0 = no cap).
+   */
+  maxDurationMinutes(row: MeetingRow, settings: MeetingsSettings): number {
+    const base = row.options.maxDurationMinutes ?? settings.maxDurationMinutes;
+    const cap = this.calendarCapMinutes(row, settings);
+    return cap === null ? base : Math.min(base, cap);
+  }
+
+  private calendarCapMinutes(row: MeetingRow, settings: MeetingsSettings): number | null {
+    const overtime = settings.calendarOvertimeMinutes;
+    if (row.source !== "calendar" || row.calendarKey === null || !(overtime > 0)) return null;
+    const event = this.repo.calendarEvent(row.calendarKey);
+    if (event === null || event.endsAt === null || event.endsAt < event.startsAt) return null;
+    return Math.max(5, Math.ceil((event.endsAt - event.startsAt) / 60_000) + Math.round(overtime));
+  }
+
   async buildBotConfig(row: MeetingRow, hostId: string, signal?: AbortSignal): Promise<BotConfig> {
     const settings = await this.settings.get();
     const parsed = parseMeetingUrl(row.url);
@@ -565,7 +593,7 @@ export class MeetingsService {
         this.bb.log.warn(`Could not read the Zoom profile: ${errorMessage(error)}`);
       }
     }
-    const maxDurationMinutes = row.options.maxDurationMinutes ?? settings.maxDurationMinutes;
+    const maxDurationMinutes = this.maxDurationMinutes(row, settings);
     return botConfigSchema.parse({
       version: 1,
       meetingId: row.id,
@@ -585,6 +613,8 @@ export class MeetingsService {
       speakerSelectors: parseSpeakerSelectors(settings.speakerSelectors),
       chromePath,
       zoomProfileDir,
+      avatar: settings.showAvatar,
+      avatarVideo: null,
       liveTranscription: settings.liveTranscription,
       transcriber: this.transcriberConfig(settings, gigaamUrl),
       createdAt: row.createdAt,
@@ -612,6 +642,11 @@ export class MeetingsService {
       this.publishMeeting(row.id);
       const config = await this.buildBotConfig(current, hostId, options.signal);
       if (this.repo.getMeeting(row.id) === null) throw notFound(row.id); // deleted meanwhile: spawn nothing
+      const usedMinutes = Math.round(config.maxDurationSec / 60);
+      if (current.source === "calendar" && current.options.maxDurationMinutes !== usedMinutes) {
+        // Keep the calendar cap the bot runs with, also after the event is pruned.
+        current = this.repo.updateMeeting(row.id, { options: { ...this.requireMeeting(row.id).options, maxDurationMinutes: usedMinutes } });
+      }
       const snapshot = await this.call("meeting.start", { config }, { hostId, signal: options.signal, timeoutMs: START_TIMEOUT_MS });
       this.starting.delete(row.id);
       if (this.repo.getMeeting(row.id) === null) throw notFound(row.id); // cleaned up below
@@ -1350,6 +1385,8 @@ export class MeetingsService {
         speakerSelectors: null,
         chromePath: settings.chromePath.trim(),
         zoomProfileDir: null,
+        avatar: settings.showAvatar,
+        avatarVideo: null,
         liveTranscription: false,
         transcriber: this.transcriberConfig(settings, gigaamUrl),
         createdAt: now,

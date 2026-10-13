@@ -17,8 +17,10 @@ The full user guide is in Russian: [docs/guide.ru.md](docs/guide.ru.md).
 | ![The Встречи page with a meeting being recorded: who is speaking, participants, the bot's screen](docs/screenshots/meetings-list-live.jpg) | ![The live transcript with speaker names and talk time](docs/screenshots/meetings-live-transcript.jpg) |
 | **The bot's live view** (the lit tile is the current speaker) | **A real Zoom meeting through the bot's eyes** |
 | ![Live view of the bot's browser in a meeting](docs/screenshots/meetings-live-view.jpg) | ![The bot inside a real Zoom meeting](docs/screenshots/meetings-zoom-live.jpg) |
-| **Full-text search across all meetings** | |
-| ![Search results with highlighted matches](docs/screenshots/meetings-search.jpg) | |
+| **Full-text search across all meetings** | **The bot's avatar as its camera** |
+| ![Search results with highlighted matches](docs/screenshots/meetings-search.jpg) | ![The bot's tile shows its avatar and name](docs/screenshots/meetings-avatar-live.jpg) |
+| **Bot name and avatar** | **Google Calendar setup** |
+| ![The Бот card with the avatar preview](docs/screenshots/meetings-bot-card.jpg) | ![The Google Календарь card with setup steps and the redirect URI](docs/screenshots/meetings-google-setup.jpg) |
 
 Screenshots show a demo meeting played by the plugin's built-in mock meeting (three Russian TTS voices), plus a real Zoom test meeting.
 
@@ -29,9 +31,21 @@ Screenshots show a demo meeting played by the plugin's built-in mock meeting (th
 - **Speakers by name.** The bot uses Zoom's own active-speaker state, the highlighted video tile and per-participant WebRTC audio tracks. Voice embeddings (TitaNet) fill the gaps. You can rename any speaker.
 - **Live view and remote control.** Watch the bot's browser from the page, and click or type into it to solve a captcha or an unexpected dialog.
 - **Zoom account sign-in.** Sign the bot in to a Zoom account for meetings that refuse guests or walled bots.
-- **Calendar auto-join.** Add a secret iCal (ICS) address from Google, Outlook or Yandex, and the bot joins every Zoom meeting in the calendar.
+- **Google Calendar auto-join (OAuth).** Connect your Google account on the Meetings page with your own OAuth client, and pick the calendars to watch. The bot then joins every event that has a Zoom link, a minute before it starts, and leaves when the call ends. Any other calendar works through its secret iCal (ICS) address.
+- **Bot name and avatar.** Set the name participants see, and upload an avatar. The bot turns on its camera and shows the avatar in a circle with its name, instead of a blank tile.
 - **Search, summaries, downloads.** Full-text search across all meetings, agent-written Markdown summaries, and downloads as md, txt, srt, vtt, json or the Opus audio.
 - **Import.** `bb meetings import <file>` transcribes an existing audio or video recording.
+
+## Google Calendar setup
+
+Google Calendar is read through your own OAuth client, which is free and takes one setup:
+
+1. In [Google Cloud Console](https://console.cloud.google.com), enable the **Google Calendar API**.
+2. Configure the **OAuth consent screen**: External, with your account as a test user. Publish the app: in *Testing*, Google expires the access after 7 days.
+3. Create an **OAuth client ID** of type **Web application**. Its authorized redirect URI is the bb address plus `/api/v1/plugins/meetings/http/google/callback`. The **Google Календарь** card on the Meetings page shows the exact URI with a copy button.
+4. Paste the Client ID and Secret into the card, click **Подключить Google Календарь**, allow read access, and tick the calendars to watch.
+
+Step-by-step instructions in Russian: [docs/guide.ru.md §8.1](docs/guide.ru.md).
 
 ## Requirements
 
@@ -153,6 +167,8 @@ Actions: `list`, `show`, `join`, `stop`, `cancel`, `delete` (needs `confirm: tru
 | `bb meetings import <file> [--title T]` | Transcribe an existing audio or video file |
 | `bb meetings logs <id>` / `screenshot <id>` / `debug-dump <id>` | Troubleshoot a bot |
 | `bb meetings calendar [sync]`, `calendar skip\|unskip <key>` | Calendar auto-join |
+| `bb meetings google [sync\|disconnect]` | Google Calendar connection (connect on the Meetings page) |
+| `bb meetings bot [--name] [--show-avatar on\|off] [--avatar <file>] [--clear-avatar]` | The bot's name and avatar |
 | `bb meetings zoom-login` / `zoom-logout` / `zoom-status` | The bot's Zoom account |
 | `bb meetings doctor` / `setup [--force]` / `selftest` | Check and install the runtime |
 
@@ -165,6 +181,7 @@ Edit them on the Meetings plugin's settings page in bb, or with `bb plugin confi
 | Key | Default | Meaning |
 |---|---|---|
 | `botName` | `Notetaker` | Name shown in the meeting |
+| `showAvatar` | `true` | Show the uploaded avatar as the bot's camera |
 | `maxDurationMinutes` | `240` | Hard stop, 5–1440 minutes |
 | `aloneTimeoutMinutes` | `2` | Leave after being alone this long |
 | `waitingTimeoutMinutes` | `20` | How long to wait for the host or in the waiting room |
@@ -185,8 +202,11 @@ Edit them on the Meetings plugin's settings page in bb, or with `bb plugin confi
 | `calendarIcsUrls` | none | Secret ICS addresses, separated by spaces (stored as a secret) |
 | `calendarAutoJoin` | `false` | Join Zoom meetings from the calendars |
 | `calendarLeadMinutes` | `1` | Join this many minutes early |
+| `calendarOvertimeMinutes` | `60` | Calendar meetings record at most the event length plus this (0 = no cap) |
 | `calendarFilter` | empty | Title substring, or `/regex/` in slashes |
 | `calendarSyncMinutes` | `5` | How often to re-read the calendars |
+| `googleClientId` | empty | Your Google OAuth client (Web application) for Google Calendar |
+| `googleClientSecret` | — | Its secret (stored as a secret setting) |
 
 ## Limits
 

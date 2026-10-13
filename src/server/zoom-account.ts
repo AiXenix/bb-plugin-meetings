@@ -146,6 +146,8 @@ export class ZoomAccount {
       speakerSelectors: null,
       chromePath,
       zoomProfileDir: profile.path,
+      avatar: false,
+      avatarVideo: null,
       liveTranscription: false,
       transcriber: this.service.transcriberConfig(settings, null),
       createdAt: now,

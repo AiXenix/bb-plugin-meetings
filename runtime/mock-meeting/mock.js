@@ -14,6 +14,9 @@
 //   startDelaySec, endDelaySec, waitingSec, audioJoin=auto|dialog, popup=0
 //   host=1             the bot is host: the Leave popover also offers a red "End Meeting for All"
 //   audioDropSec=N     Zoom drops the bot's computer audio N s after it entered
+//   previewVideo=off   the pre-join camera starts off ("Start Video"), as Zoom does for some users
+//   joinVideo=off      the camera is off after entering whatever the preview said (the bot must press Start Video)
+//   cameraDelaySec=N   the camera takes N s to start; like Zoom, the button says Start Video and is disabled meanwhile
 //   log=<url>          where events are POSTed (default ./log next to this page)
 (() => {
   "use strict";
@@ -37,6 +40,9 @@
     popup: params.get("popup") !== "0",
     host: params.get("host") === "1",
     audioDropSec: num("audioDropSec", 0),
+    previewVideo: params.get("previewVideo") !== "off",
+    joinVideo: params.get("joinVideo") !== "off",
+    cameraDelaySec: num("cameraDelaySec", 0),
     logUrl: params.get("log") || new URL("log", location.href).href,
   };
 
@@ -125,11 +131,15 @@
   }
   $("#preview-audio-control-button").addEventListener("click", (e) => toggleLabel(e.currentTarget, "Mute", "Unmute"));
   $("#preview-video-control-button").addEventListener("click", (e) => toggleLabel(e.currentTarget, "Stop Video", "Start Video"));
+  if (!opt.previewVideo) toggleLabel($("#preview-video-control-button"), "Stop Video", "Start Video");
 
   joinButton.addEventListener("click", () => {
     if (joinButton.classList.contains("disabled")) return;
     botName = nameInput.value.trim();
-    report("joined", { name: botName, previewMic: $("#preview-audio-control-button").getAttribute("aria-label") });
+    const previewVideo = $("#preview-video-control-button").getAttribute("aria-label");
+    report("joined", { name: botName, previewMic: $("#preview-audio-control-button").getAttribute("aria-label"), previewVideo });
+    // Like Zoom: the camera stays as the preview left it (unless joinVideo=off).
+    if (previewVideo === "Stop Video" && opt.joinVideo) setVideo(true).catch(() => {});
     enterMeeting().catch((error) => report("error", { error: String(error) }));
   });
 
@@ -145,6 +155,114 @@
     return BOT_ID + 1024 * (participants.indexOf(name) + 1);
   }
 
+  // ------------------------------------------------------------ the bot's camera
+
+  // The bot's own camera, shown in its tile like Zoom's self view: with an
+  // avatar, Chrome's fake camera plays the rendered MJPEG (DESIGN §14).
+  let videoOn = false;
+  let camera = null;
+  const selfVideo = document.createElement("video");
+  selfVideo.className = "mock-self-video";
+  selfVideo.muted = true;
+  selfVideo.autoplay = true;
+  selfVideo.playsInline = true;
+
+  function setVideoButton() {
+    const button = $("#video-button");
+    const text = videoOn ? "Stop Video" : "Start Video";
+    button.setAttribute("aria-label", text);
+    button.querySelector("svg").setAttribute("class", videoOn ? "SvgVideoOn" : "SvgVideoOff");
+    button.querySelector(".footer-button-base__button-label").textContent = text;
+  }
+
+  /** Mean color of a small patch of the playing camera frame at (fx, fy) of its size. */
+  function samplePatch(fx, fy) {
+    const w = selfVideo.videoWidth;
+    const h = selfVideo.videoHeight;
+    if (!w || !h) return null;
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const g = canvas.getContext("2d", { willReadFrequently: true });
+    g.drawImage(selfVideo, 0, 0, w, h);
+    const data = g.getImageData(Math.round(fx * w) - 4, Math.round(fy * h) - 4, 8, 8).data;
+    const sum = [0, 0, 0];
+    for (let i = 0; i < data.length; i += 4) for (let c = 0; c < 3; c += 1) sum[c] += data[i + c];
+    return sum.map((v) => Math.round(v / (data.length / 4)));
+  }
+
+  async function reportCamera() {
+    const started = Date.now();
+    let lastTime = -1;
+    for (let i = 0; i < 6 && videoOn && !left; i += 1) {
+      await sleep(1000);
+      const tile = selfVideo.closest(".gallery-video-container__video-frame");
+      const rect = selfVideo.getBoundingClientRect();
+      const advancing = selfVideo.currentTime > lastTime;
+      lastTime = selfVideo.currentTime;
+      report("camera", {
+        on: videoOn,
+        playing: !selfVideo.paused && selfVideo.readyState >= 2 && advancing,
+        width: selfVideo.videoWidth,
+        height: selfVideo.videoHeight,
+        label: camera?.getVideoTracks()[0]?.label ?? null,
+        inBotTile: tile?.dataset.name === botName,
+        box: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
+        // Upper part of the avatar circle (the frame draws it centered above the name).
+        avatarColor: samplePatch(0.5, 0.28),
+        backgroundColor: samplePatch(0.08, 0.5),
+        afterMs: Date.now() - started,
+      });
+    }
+  }
+
+  /** Put the camera into the bot's tile (or take it out) without re-rendering the other tiles. */
+  function updateSelfTile() {
+    const frame = [...document.querySelectorAll(".gallery-video-container__video-frame")].find((el) => el.dataset.name === botName);
+    if (!frame) return;
+    const show = videoOn && camera !== null;
+    if (show) frame.querySelector("video-player").append(selfVideo);
+    else selfVideo.remove();
+    frame.querySelector(".video-avatar__avatar").hidden = show;
+  }
+
+  async function setVideo(on) {
+    if (!on) {
+      videoOn = false;
+      setVideoButton();
+      for (const track of camera?.getTracks() ?? []) track.stop();
+      camera = null;
+      selfVideo.srcObject = null;
+      updateSelfTile();
+      report("camera", { on: false });
+      return;
+    }
+    // Starting: the button stays "Start Video" and disabled until the camera runs.
+    const button = $("#video-button");
+    button.setAttribute("aria-disabled", "true");
+    try {
+      if (opt.cameraDelaySec > 0) await sleep(opt.cameraDelaySec * 1000);
+      camera = await navigator.mediaDevices.getUserMedia({ video: true });
+      videoOn = true;
+      selfVideo.srcObject = camera;
+      await selfVideo.play().catch(() => {});
+      updateSelfTile();
+      reportCamera().catch(() => {});
+    } catch (error) {
+      videoOn = false;
+      report("camera", { on: false, error: String(error) });
+    } finally {
+      button.removeAttribute("aria-disabled");
+      setVideoButton();
+    }
+  }
+
+  $("#video-button").addEventListener("click", (event) => {
+    if (event.currentTarget.getAttribute("aria-disabled") === "true") return;
+    report("video-button", { on: !videoOn });
+    setVideo(!videoOn).catch(() => {});
+  });
+
   function renderTiles() {
     const gallery = $("#gallery");
     gallery.textContent = "";
@@ -157,6 +275,10 @@
       avatar.textContent = name.slice(0, 1);
       const player = document.createElement("video-player");
       player.setAttribute("node-id", String(name === botName ? BOT_ID : idFor(name)));
+      if (name === botName && videoOn && camera) {
+        player.append(selfVideo);
+        avatar.hidden = true;
+      }
       const footer = document.createElement("div");
       footer.className = "video-avatar__avatar-footer";
       const span = document.createElement("span");
@@ -173,7 +295,7 @@
     $("#participants-count").textContent = String(count);
     $("#participants-button").setAttribute("aria-label", `open the participants list pane,[${count}] particpants`);
     const attendees = [
-      { userId: BOT_ID, displayName: botName, isHost: opt.host, isGuest: !opt.host, muted: true, bVideoOn: false },
+      { userId: BOT_ID, displayName: botName, isHost: opt.host, isGuest: !opt.host, muted: true, bVideoOn: videoOn },
       ...participants.map((name, i) => ({ userId: idFor(name), displayName: name, isHost: !opt.host && i === 0, isGuest: opt.host || i !== 0, muted: false, bVideoOn: false })),
     ];
     store.dispatch({
@@ -265,6 +387,7 @@
     if (left) return;
     left = true;
     report(why === "left" ? "left" : "closed", { why });
+    for (const track of camera?.getTracks() ?? []) track.stop();
     $("#meeting-app").hidden = true;
     $("#left-page").hidden = false;
     document.title = "Zoom";
@@ -280,7 +403,7 @@
       else speakingIds.delete(id + 1);
       // Audio node ids may differ from user ids in the low bits.
       const [asn1 = 0, asn2 = 0, asn3 = 0] = [...speakingIds];
-      store.dispatch({ type: "mock/patch", patch: { audio: { asnIds: { asn1, asn2, asn3, asnUser: null } } } });
+      store.dispatch({ type: "mock/patch", patch: { audio: { ...store.getState().audio, asnIds: { asn1, asn2, asn3, asnUser: null } } } });
     }, opt.storeLagMs);
     setTimeout(() => {
       for (const frame of document.querySelectorAll(".gallery-video-container__video-frame")) {
@@ -512,6 +635,13 @@
       });
       document.body.append(tip);
     }
+    // Like Zoom's store: the device lists and the chosen speaker ("default" on a fresh profile).
+    const devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+    const brief = (kind) => devices.filter((d) => d.kind === kind).map((d) => ({ deviceId: d.deviceId, label: d.label }));
+    store.dispatch({
+      type: "mock/patch",
+      patch: { audio: { ...store.getState().audio, activeSpeaker: "default", speakerDevicesList: brief("audiooutput"), activeMicrophone: "default", microphoneDevicesList: brief("audioinput") } },
+    });
     await setupAudio(participants);
     status(`${engine.mode}: ready`);
     await runScript(items, base);

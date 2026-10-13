@@ -1,8 +1,9 @@
 // HTTP routes (docs/dev/DESIGN.md §8.4), served at
 // /api/v1/plugins/meetings/http/<path>: audio with Range support, the latest
-// screenshot, transcript/audio downloads, and the mock meeting page for the
-// selftest. Bytes come from the host in ≤ 4 MiB reads (base64 stays under the
-// 8 MiB host RPC output cap).
+// screenshot, transcript/audio downloads, the bot's avatar frame (§14), the
+// Google OAuth redirect (§13), and the mock meeting page for the selftest.
+// Bytes come from the host in ≤ 4 MiB reads (base64 stays under the 8 MiB
+// host RPC output cap).
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type { Context } from "hono";
 import { RUNTIME_FILES } from "../generated/runtime-files.js";
@@ -17,6 +18,8 @@ import {
   renderTranscript,
   type TranscriptFormat,
 } from "./format.js";
+import { GOOGLE_CALLBACK_ROUTE } from "./google-auth.js";
+import type { GoogleCallbackOutcome } from "./google-service.js";
 import type { MeetingsService } from "./service.js";
 
 /** Bytes per host read and per response to an open-ended range. */
@@ -134,6 +137,51 @@ async function streamFile(
   return new Response(body, { status, headers });
 }
 
+export function escapeHtml(text: string): string {
+  return text.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
+}
+
+/** The small self-contained page the browser lands on after Google's consent screen. */
+export function googleResultPage(outcome: GoogleCallbackOutcome): Response {
+  const html = `<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(outcome.title)}</title>
+<style>
+  :root { color-scheme: light dark; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: Canvas; color: CanvasText; }
+  main { max-width: 32rem; margin: 1.5rem; padding: 1.75rem 2rem; border: 1px solid color-mix(in srgb, CanvasText 15%, transparent); border-radius: 0.75rem; }
+  h1 { font-size: 1.25rem; margin: 0 0 0.75rem; }
+  .ok h1 { color: #15803d; } .fail h1 { color: #b91c1c; }
+  @media (prefers-color-scheme: dark) { .ok h1 { color: #4ade80; } .fail h1 { color: #f87171; } }
+  p { line-height: 1.5; margin: 0 0 1rem; }
+  a { color: LinkText; }
+</style>
+</head>
+<body>
+<main class="${outcome.ok ? "ok" : "fail"}">
+<h1>${escapeHtml(outcome.title)}</h1>
+<p>${escapeHtml(outcome.message)}</p>
+<p><a href="${escapeHtml(outcome.backPath)}">Вернуться к встречам</a></p>
+</main>
+</body>
+</html>
+`;
+  return new Response(html, {
+    status: outcome.ok ? 200 : 400,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      // The address bar still holds the code: never send it on as a referrer.
+      "referrer-policy": "no-referrer",
+      "x-content-type-options": "nosniff",
+    },
+  });
+}
+
 const MOCK_TYPES: Readonly<Record<string, string>> = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -155,6 +203,32 @@ function registerMockMeeting(bb: BbPluginApi): void {
 
 export function registerHttp(bb: BbPluginApi, service: MeetingsService): void {
   registerMockMeeting(bb);
+
+  // Google redirects here after the consent screen (a top-level navigation: no Origin header, "local" auth passes).
+  bb.http.route("GET", GOOGLE_CALLBACK_ROUTE, async (c) => {
+    const query = (name: string) => c.req.query(name)?.slice(0, 4096);
+    const outcome = await service.google.handleCallback({
+      code: query("code"),
+      state: query("state"),
+      error: query("error"),
+      errorDescription: query("error_description"),
+    });
+    return googleResultPage(outcome);
+  });
+
+  bb.http.route("GET", "/bot/avatar-preview", async () => {
+    try {
+      const jpeg = await service.bot.preview();
+      if (jpeg === null) return jsonError(404, "Аватар не загружен");
+      return new Response(new Uint8Array(jpeg), {
+        status: 200,
+        headers: { "content-type": "image/jpeg", "content-length": String(jpeg.byteLength), "cache-control": "no-store" },
+      });
+    } catch (error) {
+      return errorResponse(error);
+    }
+  });
+
   for (const method of ["GET", "HEAD"] as const) {
     bb.http.route(method, "/audio", async (c) => {
       const id = meetingIdFrom(c);

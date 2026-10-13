@@ -17,7 +17,8 @@ import {
   pluralRu,
   toDatetimeLocal,
 } from "./format";
-import { END_REASON_TEXT, ERROR_TEXT, STATUS_TEXT, statusText } from "./labels";
+import { AVATAR_ACCEPT, AVATAR_MAX_BYTES, formatMegabytes, isAvatarMimeType, squareCrop } from "./avatar-image";
+import { END_REASON_TEXT, ERROR_TEXT, STATUS_TEXT, calendarSourceLabel, statusText } from "./labels";
 import { parseMarkdown, renderMarkdown, safeHref } from "./markdown";
 import { meetingSubPath, parseRoute } from "./route";
 import { NEUTRAL_SPEAKER_COLOR, speakerColors } from "./speaker-colors";
@@ -52,6 +53,9 @@ describe("constants mirror src/shared", () => {
     expect(constants.CHANNEL_ENV_CHANGED).toBe(shared.CHANNEL_ENV_CHANGED);
     expect(constants.CHANNEL_CALENDAR_CHANGED).toBe(shared.CHANNEL_CALENDAR_CHANGED);
     expect(constants.CHANNEL_ZOOM_CHANGED).toBe(shared.CHANNEL_ZOOM_CHANGED);
+    expect(constants.CHANNEL_GOOGLE_CHANGED).toBe(shared.CHANNEL_GOOGLE_CHANGED);
+    expect(constants.CHANNEL_BOT_CHANGED).toBe(shared.CHANNEL_BOT_CHANGED);
+    expect(constants.GOOGLE_CALLBACK_PATH).toBe(shared.GOOGLE_CALLBACK_PATH);
     expect(constants.SNIPPET_OPEN).toBe(shared.SNIPPET_OPEN);
     expect(constants.SNIPPET_CLOSE).toBe(shared.SNIPPET_CLOSE);
     expect([...constants.ACTIVE_STATUSES].sort()).toEqual([...shared.ACTIVE_STATUSES].sort());
@@ -77,6 +81,33 @@ describe("constants mirror src/shared", () => {
     expect(constants.downloadUrl("mtg_abc123", "srt")).toBe(
       "/api/v1/plugins/meetings/http/download?id=mtg_abc123&format=srt",
     );
+    expect(constants.avatarPreviewUrl(17, "Бот & Co")).toBe(
+      "/api/v1/plugins/meetings/http/bot/avatar-preview?v=17&name=%D0%91%D0%BE%D1%82%20%26%20Co",
+    );
+  });
+
+  it("calendar events are marked by source", () => {
+    expect(calendarSourceLabel("gcal:primary:evt1")).toBe("Google");
+    expect(calendarSourceLabel("uid-1@example.com@1760000000000")).toBe("календарь");
+    expect(calendarSourceLabel(null)).toBe("календарь");
+  });
+});
+
+describe("avatar image helpers", () => {
+  it("crops the centered square and caps its side", () => {
+    expect(squareCrop(2000, 1000)).toEqual({ sx: 500, sy: 0, side: 1000, size: 1000 });
+    expect(squareCrop(3000, 4000)).toEqual({ sx: 0, sy: 500, side: 3000, size: 1024 });
+    expect(squareCrop(301, 300)).toEqual({ sx: 0, sy: 0, side: 300, size: 300 });
+    expect(squareCrop(0, 10).size).toBe(0);
+  });
+
+  it("types and megabytes", () => {
+    expect(isAvatarMimeType("image/webp")).toBe(true);
+    expect(isAvatarMimeType("image/gif")).toBe(false);
+    expect(AVATAR_ACCEPT).toBe("image/png,image/jpeg,image/webp");
+    expect(formatMegabytes(AVATAR_MAX_BYTES)).toBe("3 МБ");
+    expect(formatMegabytes(4.2 * 1024 * 1024)).toBe("4,2 МБ");
+    expect(formatMegabytes(AVATAR_MAX_BYTES + 1)).toBe("3,1 МБ");
   });
 });
 

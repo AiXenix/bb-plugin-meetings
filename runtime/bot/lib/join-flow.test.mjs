@@ -49,9 +49,9 @@ const form = (over = {}) =>
  * A fake page whose markers come from `script(elapsedMs, state)`; other ops
  * answer as an in-meeting page with computer audio joined.
  */
-function fakeContext(script, { waitingTimeoutSec = 60, hang = false } = {}) {
+function fakeContext(script, { waitingTimeoutSec = 60, hang = false, camera = "off" } = {}) {
   const t0 = Date.now();
-  const state = { joinClicks: 0, gotos: 0 };
+  const state = { joinClicks: 0, gotos: 0, ops: [] };
   const locator = () => ({
     first: () => locator(),
     or: () => locator(),
@@ -70,6 +70,7 @@ function fakeContext(script, { waitingTimeoutSec = 60, hang = false } = {}) {
     evaluate: async (source) => {
       if (hang) return new Promise(() => {});
       const args = JSON.parse(source.slice(source.lastIndexOf(")({") + 2, -1));
+      state.ops.push(args.action ? `${args.op}:${args.action}` : args.op);
       if (args.op === "markers") return script(Date.now() - t0, state);
       if (args.op === "audio") return { label: "unmute my microphone", joined: true, muted: true, clicked: null };
       if (args.op === "sweep") return [];
@@ -98,6 +99,7 @@ function fakeContext(script, { waitingTimeoutSec = 60, hang = false } = {}) {
     setPhase: (phase, detail) => phases.push(`${phase}: ${detail}`),
     dumpDebug: async () => {},
     wantScreenshot: () => {},
+    camera,
     adapterState: {},
   };
   return { ctx, state, phases, t0 };
@@ -177,5 +179,36 @@ describe("joinFlow deadline", () => {
     const { ctx } = fakeContext((_, s) => (s.joinClicks === 0 ? form() : markers({ waitingRoom: true })), { waitingTimeoutSec: 120 });
     const result = await drive(joinFlow(ctx, { launchPage: false }), 3_600_000);
     assert.equal(result?.error?.code, "waiting_timeout");
+  });
+});
+
+describe("after admission (the recorder starts only when joinFlow returns)", () => {
+  beforeEach(() => mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_800_000_000_000 }));
+  afterEach(() => mock.timers.reset());
+
+  /** Virtual ms from the Join click to joinFlow's return, and the page ops made. */
+  async function admissionTime(camera) {
+    let admittedAt = null;
+    const { ctx, state } = fakeContext(
+      (_, s) => {
+        if (s.joinClicks === 0) return form();
+        admittedAt ??= Date.now();
+        return markers({ inMeeting: true });
+      },
+      { camera },
+    );
+    const result = await drive(joinFlow(ctx, { launchPage: false }), 600_000);
+    assert.ok(result?.ok, result?.error?.message ?? "still joining");
+    return { ms: Date.now() - admittedAt, ops: state.ops };
+  }
+
+  it("does not hold up the recording for the avatar camera when Zoom shows no camera button", async () => {
+    // The fake page answers no "video" op (no footer camera button, e.g. a webinar attendee).
+    const off = await admissionTime("off");
+    const avatar = await admissionTime("avatar");
+    assert.ok(avatar.ms - off.ms < 1_000, `the avatar camera added ${avatar.ms - off.ms} ms before the recorder (camera off: ${off.ms} ms)`);
+    assert.equal(avatar.ops.filter((op) => op === "video:state").length, 1, "one camera check");
+    assert.ok(!avatar.ops.includes("store"), "the speaker choice is read later, by the sampler");
+    assert.ok(off.ops.includes("audio:videoOff") && !off.ops.some((op) => op.startsWith("video")));
   });
 });

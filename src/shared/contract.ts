@@ -98,6 +98,17 @@ export type RuntimeSnapshot = z.infer<typeof runtimeSnapshotSchema>;
 
 const meetingRef = z.object({ meetingId: meetingIdSchema }).strict();
 
+export const avatarStatusSchema = z
+  .object({
+    hasAvatar: z.boolean(),
+    /** Changes whenever the image changes; use as a cache-buster. */
+    updatedAt: z.number().nullable(),
+    /** Side of the normalized square PNG, px. */
+    size: z.number().int().nullable(),
+  })
+  .strict();
+export type AvatarStatus = z.infer<typeof avatarStatusSchema>;
+
 export const hostContract = defineRpcContract({
   "env.check": {
     experimental_description:
@@ -246,6 +257,24 @@ export const hostContract = defineRpcContract({
         updatedAt: z.number().nullable(),
       })
       .strict(),
+  },
+  "bot.avatar": {
+    experimental_description:
+      "Inspect, replace or remove the bot's avatar image on this host (<hostData>/bot/avatar.*). set: a PNG/JPEG/WebP image ≤ 3 MiB, normalized to a square PNG.",
+    input: z
+      .object({
+        action: z.enum(["status", "set", "clear"]),
+        imageBase64: z.string().max(4_500_000).optional(),
+        mimeType: z.enum(["image/png", "image/jpeg", "image/webp"]).optional(),
+      })
+      .strict(),
+    output: avatarStatusSchema,
+  },
+  "bot.avatarPreview": {
+    experimental_description:
+      "Render the frame the bot shows as its camera (avatar + name, 1280x720) and return it as a JPEG; null when no avatar is set.",
+    input: z.object({ botName: z.string().min(1).max(64) }).strict(),
+    output: z.object({ jpegBase64: z.string().nullable() }).strict(),
   },
   "meeting.delete": {
     experimental_description: "Kill the meeting's processes and remove its directory.",

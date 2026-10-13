@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.0 — 2026-10-13
+
+- **Google Calendar over OAuth.** Connect a Google account on the Встречи page, with your own OAuth client (Web application, Calendar API, read-only scope, PKCE), and tick the calendars to watch.
+  - The bot joins every event with a Zoom link a minute before it starts and leaves when the call ends.
+  - Calendar recordings are capped at the event length + `calendarOvertimeMinutes` (default 60).
+  - The calendar handles recurring events, declined, cancelled and all-day events, links from Zoom conferencing, location or description, moved and deleted events, and the same meeting in two calendars.
+- **Calendar auto-join toggle** on the page, shared by Google and ICS calendars.
+- **Bot name and avatar.**
+  - The **Бот** card sets the name participants see.
+  - An uploaded avatar turns the bot's camera on: the avatar in a circle with the name, rendered on the recording machine.
+  - Settings: `showAvatar`, `googleClientId`, `googleClientSecret`, `calendarOvertimeMinutes`.
+- **CLI.** `bb meetings google [sync|disconnect]`, `bb meetings bot`. The `bb meetings api` calendar action now includes Google.
+
 ## 0.1.0 — 2026-10-13
 
 First release.

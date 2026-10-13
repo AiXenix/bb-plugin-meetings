@@ -8,6 +8,7 @@ import {
   type ExperimentalHostRpcHandlers,
 } from "@get-bb/plugin-sdk";
 import { hostContract } from "./src/shared/contract.js";
+import { avatarAction, renderAvatarPreview } from "./src/host/avatar.js";
 import { checkEnv } from "./src/host/env.js";
 import { untilAborted } from "./src/host/exec.js";
 import { discoverGigaam } from "./src/host/gigaam.js";
@@ -117,6 +118,12 @@ const handlers: ExperimentalHostRpcHandlers<typeof hostContract> = {
     const paths = pathsFor(context.experimental_paths.dataDir);
     return action === "delete" ? deleteZoomProfile(paths) : zoomProfileStatus(paths);
   },
+
+  "bot.avatar": async (input, context) => avatarAction(pathsFor(context.experimental_paths.dataDir), input, context.signal),
+
+  "bot.avatarPreview": async ({ botName }, context) => ({
+    jpegBase64: await renderAvatarPreview(pathsFor(context.experimental_paths.dataDir), botName, { signal: context.signal }),
+  }),
 
   "meeting.delete": async ({ meetingId }, context) => ({
     deleted: await deleteMeeting(pathsFor(context.experimental_paths.dataDir), meetingId),

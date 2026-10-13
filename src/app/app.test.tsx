@@ -9,7 +9,9 @@ import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import type { RenderedSlot } from "@get-bb/plugin-sdk/testing/app";
 import type { EnvReport } from "../shared/contract";
 import type {
+  BotProfile,
   CalendarStatus,
+  GoogleStatus,
   LiveView,
   MeetingDetail,
   MeetingSummary,
@@ -100,12 +102,33 @@ const NO_CALENDAR: CalendarStatus = {
   upcoming: [],
 };
 
+const BOT_PROFILE: BotProfile = {
+  botName: "Notetaker",
+  avatar: { hasAvatar: false, enabled: true, version: null },
+};
+
+const NO_GOOGLE: GoogleStatus = {
+  configured: false,
+  clientId: "",
+  callbackPath: "/api/v1/plugins/meetings/http/google/callback",
+  connected: false,
+  email: null,
+  calendars: [],
+  lastSyncAt: null,
+  lastError: null,
+  upcomingCount: 0,
+  connectedAt: null,
+  lastConsent: null,
+};
+
 function baseHandlers(overrides: Handlers = {}): Handlers {
   return {
     "meetings.list": () => ({ meetings: [], nextBefore: null }),
     "env.status": () => ({ env: READY_ENV, error: null }),
     "zoom.status": () => NO_ZOOM,
     "calendar.status": () => NO_CALENDAR,
+    "bot.profile": () => BOT_PROFILE,
+    "google.status": () => NO_GOOGLE,
     ...overrides,
   };
 }

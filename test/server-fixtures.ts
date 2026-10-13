@@ -1,7 +1,11 @@
 // Shared test fixtures: an in-memory host entry that simulates meeting
-// runtimes (bot/transcriber state files) and a loader around createFakePluginHost.
+// runtimes (bot/transcriber state files), a loader around
+// createFakePluginHost, and a fake Google (OAuth + Calendar API) on 127.0.0.1.
+import { createHash, randomBytes } from "node:crypto";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
-import type { EnvReport, RuntimeSnapshot } from "../src/shared/contract.js";
+import type { AvatarStatus, EnvReport, RuntimeSnapshot } from "../src/shared/contract.js";
 import {
   botConfigSchema,
   type BotConfig,
@@ -10,6 +14,8 @@ import {
   type TranscriberState,
 } from "../src/shared/runtime-files.js";
 import { createMeetingsPlugin } from "../server.js";
+import type { GoogleEndpoints } from "../src/server/google-auth.js";
+import type { GoogleEvent } from "../src/server/google-calendar.js";
 import type { MeetingsService } from "../src/server/service.js";
 
 export const HOST = "host-1";
@@ -113,6 +119,9 @@ export class FakeRuntime {
   viewers: Array<{ meetingId: string; untilMs: number }> = [];
   /** Called on every meeting.status poll, to script transitions. */
   onStatus: ((ids: string[]) => void) | null = null;
+  avatar: AvatarStatus = { hasAvatar: false, updatedAt: null, size: null };
+  avatarSets: Array<{ mimeType: string; bytes: number }> = [];
+  previews: string[] = [];
 
   get(id: string): FakeMeeting {
     const meeting = this.meetings.get(id);
@@ -254,6 +263,18 @@ export class FakeRuntime {
       case "zoom.profile":
         if (args.action === "delete") this.profile = { ...this.profile, exists: false, signedIn: false, updatedAt: null };
         return { ...this.profile };
+      case "bot.avatar":
+        if (args.action === "set") {
+          const bytes = Buffer.from(args.imageBase64 as string, "base64").length;
+          this.avatarSets.push({ mimeType: args.mimeType as string, bytes });
+          this.avatar = { hasAvatar: true, updatedAt: 7_000 + this.avatarSets.length, size: 512 };
+        } else if (args.action === "clear") {
+          this.avatar = { hasAvatar: false, updatedAt: null, size: null };
+        }
+        return { ...this.avatar };
+      case "bot.avatarPreview":
+        this.previews.push(args.botName as string);
+        return { jpegBase64: this.avatar.hasAvatar ? Buffer.from([0xff, 0xd8, 0xff, 0xe0, 9, 9]).toString("base64") : null };
       case "meeting.delete":
         return { deleted: this.meetings.delete(args.meetingId as string) };
       case "runtime.list":
@@ -271,6 +292,7 @@ export interface LoadOptions {
   primaryHostId?: string | null;
   sendThrows?: boolean;
   loopbackBaseUrl?: string;
+  googleEndpoints?: Partial<GoogleEndpoints>;
 }
 
 export async function load(options: LoadOptions = {}) {
@@ -299,6 +321,7 @@ export async function load(options: LoadOptions = {}) {
     now: options.now,
     joinPollMs: 5,
     fetchText: options.fetchText,
+    googleEndpoints: options.googleEndpoints,
     onService: (s) => (service = s),
   })(bb);
   if (service === null) throw new Error("service not created");
@@ -336,4 +359,210 @@ let nextMeetingNumber = 81234560000;
 export function uniqueZoomUrl(): string {
   nextMeetingNumber += 1;
   return `https://us02web.zoom.us/j/${nextMeetingNumber}?pwd=AbCdEf123.1`;
+}
+
+// ---------- fake Google ----------
+
+export interface GoogleRequest {
+  method: string;
+  path: string;
+  query: Record<string, string>;
+  form: Record<string, string>;
+  authorization: string | null;
+}
+
+interface IssuedCode {
+  challenge: string;
+  redirectUri: string;
+  clientId: string;
+  scope: string;
+}
+
+/**
+ * Google's OAuth endpoints and the Calendar API v3, in memory: codes are
+ * issued by `approve` (what the consent screen does), tokens are checked
+ * like Google does (PKCE verifier, redirect URI, client credentials).
+ */
+export class FakeGoogle {
+  readonly requests: GoogleRequest[] = [];
+  readonly revoked: string[] = [];
+  clientId = "1234567890-test.apps.googleusercontent.com";
+  clientSecret = "GOCSPX-test-secret";
+  email = "anna@example.com";
+  /** Lifetime of issued access tokens, seconds. */
+  expiresIn = 3600;
+  /** The scope granted at consent (a user may untick the calendar). */
+  grantedScope = "openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/calendar.readonly";
+  calendars: Array<Record<string, unknown>> = [
+    { id: "anna@example.com", summary: "anna@example.com", primary: true, backgroundColor: "#9fe1e7", accessRole: "owner" },
+    { id: "team@group.calendar.google.com", summary: "Команда", summaryOverride: "Команда (общий)", backgroundColor: "#f83a22", accessRole: "reader" },
+  ];
+  /** Events per calendar id. */
+  events = new Map<string, GoogleEvent[]>();
+  /** Answer the Calendar API with this status (and Google's error body) instead. */
+  failCalendar: { status: number; reason: string } | null = null;
+  /** The refresh token was revoked on Google's side. */
+  refreshRevoked = false;
+  /** Items per calendarList / events.list page (null: one page), as Google may page however it likes. */
+  pageSize: number | null = null;
+  /** The code exchange returns an OpenID id_token with the account's email. */
+  issueIdToken = true;
+  /** userinfo answers 503. */
+  failUserinfo = false;
+  /** While set, the Calendar API answers 401 to every access token, as for a token revoked mid-sync. */
+  rejectAccessTokens = false;
+  /** Awaited before a Calendar API request is answered (to hold one, e.g. calendarList). */
+  gate: ((path: string) => Promise<void>) | null = null;
+  private readonly codes = new Map<string, IssuedCode>();
+  private readonly issuedCodes: string[] = [];
+  private readonly accessTokens = new Set<string>();
+  private readonly refreshTokens = new Set<string>();
+  private server: Server | null = null;
+  private base = "";
+
+  get endpoints(): GoogleEndpoints {
+    return {
+      authUrl: `${this.base}/o/oauth2/v2/auth`,
+      tokenUrl: `${this.base}/token`,
+      userinfoUrl: `${this.base}/v1/userinfo`,
+      revokeUrl: `${this.base}/revoke`,
+      calendarApi: `${this.base}/calendar/v3`,
+    };
+  }
+
+  /** Every secret the fake handed out or received: none may show up in RPC output or logs. */
+  get secrets(): string[] {
+    return [this.clientSecret, ...this.accessTokens, ...this.refreshTokens, ...this.issuedCodes, ...this.revoked];
+  }
+
+  async start(): Promise<this> {
+    this.server = createServer((request, response) => {
+      void this.handle(request, response).catch((error: unknown) => {
+        response.statusCode = 500;
+        response.end(JSON.stringify({ error: String(error) }));
+      });
+    });
+    await new Promise<void>((resolve) => this.server!.listen(0, "127.0.0.1", resolve));
+    this.base = `http://127.0.0.1:${(this.server.address() as AddressInfo).port}`;
+    return this;
+  }
+
+  async stop(): Promise<void> {
+    if (this.server === null) return;
+    this.server.closeAllConnections();
+    await new Promise((resolve) => this.server!.close(resolve));
+    this.server = null;
+  }
+
+  /** The user approves the consent screen opened at `authUrl`: returns the callback query. */
+  approve(authUrl: string): { code: string; state: string } {
+    const url = new URL(authUrl);
+    const code = `code-${randomBytes(6).toString("hex")}`;
+    this.issuedCodes.push(code);
+    this.codes.set(code, {
+      challenge: url.searchParams.get("code_challenge") ?? "",
+      redirectUri: url.searchParams.get("redirect_uri") ?? "",
+      clientId: url.searchParams.get("client_id") ?? "",
+      scope: this.grantedScope,
+    });
+    return { code, state: url.searchParams.get("state") ?? "" };
+  }
+
+  calls(path: string): GoogleRequest[] {
+    return this.requests.filter((request) => request.path === path || request.path.startsWith(`${path}?`));
+  }
+
+  private json(response: ServerResponse, status: number, body: unknown): void {
+    response.statusCode = status;
+    response.setHeader("content-type", "application/json; charset=utf-8");
+    response.end(JSON.stringify(body));
+  }
+
+  /** One page of `items` for the request's pageToken (an offset here). */
+  private page<T>(items: readonly T[], url: URL): { items: T[]; nextPageToken?: string } {
+    if (this.pageSize === null) return { items: [...items] };
+    const offset = Number(url.searchParams.get("pageToken") ?? "0");
+    const next = offset + this.pageSize;
+    return { items: items.slice(offset, next), ...(next < items.length ? { nextPageToken: String(next) } : {}) };
+  }
+
+  private issueTokens(withRefresh: boolean): Record<string, unknown> {
+    const accessToken = `ya29.access-${randomBytes(6).toString("hex")}`;
+    this.accessTokens.add(accessToken);
+    const body: Record<string, unknown> = { access_token: accessToken, expires_in: this.expiresIn, token_type: "Bearer", scope: this.grantedScope };
+    if (withRefresh) {
+      const refreshToken = `1//refresh-${randomBytes(6).toString("hex")}`;
+      this.refreshTokens.add(refreshToken);
+      body.refresh_token = refreshToken;
+    }
+    return body;
+  }
+
+  private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const url = new URL(request.url ?? "/", this.base);
+    let raw = "";
+    for await (const chunk of request) raw += String(chunk);
+    const form = Object.fromEntries(new URLSearchParams(raw));
+    const authorization = request.headers.authorization ?? null;
+    this.requests.push({ method: request.method ?? "GET", path: url.pathname, query: Object.fromEntries(url.searchParams), form, authorization });
+    const bearer = authorization?.startsWith("Bearer ") ? authorization.slice(7) : null;
+    const authorized = bearer !== null && this.accessTokens.has(bearer) && !(this.rejectAccessTokens && url.pathname.startsWith("/calendar/v3/"));
+
+    if (request.method === "POST" && url.pathname === "/token") {
+      if (form.client_id !== this.clientId || form.client_secret !== this.clientSecret) {
+        return this.json(response, 401, { error: "invalid_client", error_description: "Unauthorized" });
+      }
+      if (form.grant_type === "authorization_code") {
+        const issued = this.codes.get(form.code ?? "");
+        this.codes.delete(form.code ?? "");
+        const challenge = createHash("sha256").update(form.code_verifier ?? "").digest("base64url");
+        if (issued === undefined || issued.challenge !== challenge || issued.redirectUri !== form.redirect_uri || issued.clientId !== form.client_id) {
+          return this.json(response, 400, { error: "invalid_grant", error_description: "Bad Request" });
+        }
+        const claims = Buffer.from(JSON.stringify({ iss: "https://accounts.google.com", sub: "1001", email: this.email, email_verified: true })).toString("base64url");
+        const idToken = this.issueIdToken ? { id_token: `eyJhbGciOiJSUzI1NiJ9.${claims}.c2lnbmF0dXJl` } : {};
+        return this.json(response, 200, { ...this.issueTokens(true), scope: issued.scope, ...idToken });
+      }
+      if (form.grant_type === "refresh_token") {
+        if (this.refreshRevoked || !this.refreshTokens.has(form.refresh_token ?? "")) {
+          return this.json(response, 400, { error: "invalid_grant", error_description: "Token has been expired or revoked." });
+        }
+        return this.json(response, 200, this.issueTokens(false));
+      }
+      return this.json(response, 400, { error: "unsupported_grant_type" });
+    }
+    if (request.method === "POST" && url.pathname === "/revoke") {
+      this.revoked.push(form.token ?? "");
+      this.refreshTokens.delete(form.token ?? "");
+      return this.json(response, 200, {});
+    }
+    if (url.pathname === "/v1/userinfo") {
+      if (!authorized) return this.json(response, 401, { error: "invalid_token" });
+      if (this.failUserinfo) return this.json(response, 503, { error: "backend_error" });
+      return this.json(response, 200, { sub: "1001", email: this.email, email_verified: true });
+    }
+    if (url.pathname.startsWith("/calendar/v3/")) {
+      if (this.gate !== null) await this.gate(url.pathname);
+      if (!authorized) {
+        return this.json(response, 401, { error: { code: 401, message: "Request had invalid authentication credentials.", status: "UNAUTHENTICATED" } });
+      }
+      if (this.failCalendar !== null) {
+        const { status, reason } = this.failCalendar;
+        return this.json(response, status, { error: { code: status, message: `Failure ${reason}`, errors: [{ reason, domain: "global" }] } });
+      }
+      if (url.pathname === "/calendar/v3/users/me/calendarList") {
+        const items = url.searchParams.get("showHidden") === "true" ? this.calendars : this.calendars.filter((calendar) => calendar.hidden !== true);
+        return this.json(response, 200, { kind: "calendar#calendarList", ...this.page(items, url) });
+      }
+      const match = /^\/calendar\/v3\/calendars\/([^/]+)\/events$/.exec(url.pathname);
+      if (match !== null) {
+        const calendarId = decodeURIComponent(match[1]!);
+        const known = this.calendars.some((calendar) => calendar.id === calendarId);
+        const events = this.events.get(calendarId) ?? (known ? [] : undefined);
+        if (events === undefined) return this.json(response, 404, { error: { code: 404, message: "Not Found", errors: [{ reason: "notFound" }] } });
+        return this.json(response, 200, { kind: "calendar#events", ...this.page(events, url) });
+      }
+    }
+    return this.json(response, 404, { error: "not found" });
+  }
 }

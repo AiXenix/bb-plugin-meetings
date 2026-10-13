@@ -1,9 +1,11 @@
-// Calendar auto-join (docs/dev/DESIGN.md §10): fetch ICS feeds, expand the
-// next 24 h of occurrences (RRULE, EXDATE, moved/cancelled overrides, TZID),
-// find Zoom links, upsert calendar_events and schedule meetings.
+// Calendar auto-join (docs/dev/DESIGN.md §10, §13): occurrences of the next
+// 24 h come from pluggable sources (ICS feeds here: RRULE, EXDATE,
+// moved/cancelled overrides, TZID; Google calendars in google-calendar.ts),
+// are upserted into calendar_events and get scheduled meetings.
 import { createHash } from "node:crypto";
 import ICAL from "ical.js";
 import { extractMeetingUrls, parseMeetingUrl } from "../shared/meeting-url.js";
+import { LIVE_STATUSES } from "../shared/rpc-contract.js";
 import type { CalendarEventRow, MeetingRow, Repository } from "./db.js";
 
 export const ICS_FETCH_TIMEOUT_MS = 20_000;
@@ -30,6 +32,16 @@ export interface CalendarOccurrence {
 export interface TimeWindow {
   readonly from: number;
   readonly to: number;
+}
+
+/** Where occurrences come from: one ICS feed, or one Google calendar. */
+export interface CalendarSource {
+  /** Stable, non-secret id stored in calendar_events.feed. */
+  readonly feed: string;
+  /** Occurrences starting inside `window`. Throws on failure: the feed's known events are then kept. */
+  load(window: TimeWindow, signal?: AbortSignal): Promise<CalendarOccurrence[]>;
+  /** A failure as shown in the UI, the CLI and logs: never with a secret (feed URL, token) in it. */
+  describeError(error: unknown): string;
 }
 
 /** Stable, non-secret id for a feed URL (the URL itself is a secret). */
@@ -143,6 +155,19 @@ function fetchFailure(error: unknown): string {
 /** Feed errors are shown in the UI, the CLI and logs: never with a URL in them. */
 function redactUrls(text: string): string {
   return text.replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "<url>");
+}
+
+/** One ICS feed as a calendar source; errors name the feed by host only. */
+export function icsSource(url: string, fetchText: (url: string, signal?: AbortSignal) => Promise<string>): CalendarSource {
+  const label = feedLabel(url);
+  return {
+    feed: feedId(url),
+    load: async (window, signal) => parseIcs(await fetchText(url, signal), window),
+    describeError: (error) => {
+      const text = redactUrls(errorText(error));
+      return text.startsWith(label) ? text : `${label}: ${text}`;
+    },
+  };
 }
 
 // ---------- parse ----------
@@ -395,12 +420,15 @@ export function parseIcs(text: string, window: TimeWindow): CalendarOccurrence[]
 export interface CalendarSyncOptions {
   readonly repo: Repository;
   readonly now: number;
-  readonly feeds: readonly string[];
+  /** ICS feed URLs, fetched with `fetchText`. */
+  readonly feeds?: readonly string[];
+  /** Further sources (Google calendars). */
+  readonly sources?: readonly CalendarSource[];
   readonly autoJoin: boolean;
   readonly leadMinutes: number;
   readonly filter: string;
   readonly signal?: AbortSignal;
-  fetchText(url: string, signal?: AbortSignal): Promise<string>;
+  fetchText?(url: string, signal?: AbortSignal): Promise<string>;
   /** Create a scheduled meeting (source "calendar") for an occurrence. */
   scheduleMeeting(event: CalendarEventRow, scheduledAt: number): MeetingRow;
   /** Update a still-scheduled meeting when its occurrence moved, was renamed or got another link. */
@@ -414,6 +442,8 @@ export interface CalendarSyncResult {
   readonly created: string[];
   readonly cancelled: string[];
   readonly errors: string[];
+  /** Per failed source: its feed id and error (the same texts as `errors`). */
+  readonly failures: Array<{ feed: string; error: string }>;
 }
 
 export function syncWindow(now: number): TimeWindow {
@@ -426,26 +456,30 @@ export async function syncCalendars(options: CalendarSyncOptions): Promise<Calen
   const created: string[] = [];
   const cancelled: string[] = [];
   const errors: string[] = [];
+  const failures: Array<{ feed: string; error: string }> = [];
   let events = 0;
   const seen = new Set<string>();
   const syncedFeeds = new Set<string>();
+  const fetchText = options.fetchText ?? fetchIcs;
+  const sources = [...(options.feeds ?? []).map((url) => icsSource(url, fetchText)), ...(options.sources ?? [])];
 
-  for (const url of options.feeds) {
-    const feed = feedId(url);
+  for (const source of sources) {
+    const feed = source.feed;
     let occurrences: CalendarOccurrence[];
     try {
-      occurrences = parseIcs(await options.fetchText(url, options.signal), window);
+      occurrences = await source.load(window, options.signal);
     } catch (error) {
       if (options.signal?.aborted) throw error;
-      const text = redactUrls(errorText(error));
-      errors.push(text.startsWith(feedLabel(url)) ? text : `${feedLabel(url)}: ${text}`);
+      const text = source.describeError(error);
+      errors.push(text);
+      failures.push({ feed, error: text });
       continue;
     }
     syncedFeeds.add(feed);
     for (const occurrence of occurrences) {
       events += 1;
       seen.add(occurrence.key);
-      const row = repo.upsertCalendarEvent({
+      repo.upsertCalendarEvent({
         key: occurrence.key,
         uid: occurrence.uid,
         feed,
@@ -456,13 +490,11 @@ export async function syncCalendars(options: CalendarSyncOptions): Promise<Calen
         status: occurrence.status,
         updatedAt: now,
       });
-      const outcome = applyAutoJoin(row, options);
-      if (outcome?.created) created.push(outcome.created);
-      if (outcome?.cancelled) cancelled.push(outcome.cancelled);
     }
   }
 
   // Occurrences that disappeared from a feed that synced fine: deleted or moved out of the window.
+  // Before scheduling, so a moved event's new occurrence does not see the old bot as a twin.
   for (const row of repo.calendarEventsBetween(window.from, window.to)) {
     if (!syncedFeeds.has(row.feed) || seen.has(row.key) || row.updatedAt >= now) continue;
     repo.setCalendarEventFields(row.key, { status: "cancelled" });
@@ -472,8 +504,15 @@ export async function syncCalendars(options: CalendarSyncOptions): Promise<Calen
       cancelled.push(meeting.id);
     }
   }
+  for (const key of seen) {
+    const row = repo.calendarEvent(key);
+    if (row === null) continue;
+    const outcome = applyAutoJoin(row, options);
+    if (outcome?.created) created.push(outcome.created);
+    if (outcome?.cancelled) cancelled.push(outcome.cancelled);
+  }
   repo.pruneCalendarEvents(now - 2 * 24 * 3600_000);
-  return { events, created, cancelled, errors };
+  return { events, created, cancelled, errors, failures };
 }
 
 /** The link as a meeting stores it (normalized), or null. */
@@ -494,6 +533,102 @@ function linkedMeeting(repo: Repository, row: CalendarEventRow): MeetingRow | nu
   return repo.meetingByCalendarKey(row.key);
 }
 
+/**
+ * The meeting still stands for its occurrence: anything but a bot cancelled
+ * before it started (skipped, filtered out, event cancelled), which is
+ * replaced when the occurrence is wanted again. A bot the user stopped before
+ * it recorded is "cancelled" too, but it started: no new bot for that.
+ */
+function claimsOccurrence(meeting: MeetingRow): boolean {
+  return meeting.status !== "cancelled" || meeting.startedAt !== null;
+}
+
+/** Within this distance the same event (UID) in two calendars, or a bot started by hand, counts as one meeting (as `join` refuses duplicates). */
+const TWIN_WINDOW_MS = 30 * 60_000;
+/** Two events with the same Zoom meeting this close in start and end are one meeting copied into two calendars. */
+const SAME_TIME_MS = 60_000;
+
+/** platform + Zoom meeting number (else the link), or null without a joinable link. */
+function meetingKey(url: string | null): string | null {
+  if (url === null) return null;
+  try {
+    const parsed = parseMeetingUrl(url);
+    return `${parsed.platform}:${parsed.meetingNumber ?? parsed.url}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Two occurrences are the same meeting: the same event in two watched
+ * calendars (same UID: an ICS feed and Google, an invitation in two Google
+ * calendars) at about the same time, or a copy of it (same Zoom meeting, same
+ * start and end). Back-to-back events in one personal meeting room are not
+ * twins: each gets its own bot (and its own length cap).
+ */
+export function isTwinOccurrence(a: CalendarEventRow, b: CalendarEventRow): boolean {
+  if (a.key === b.key) return false;
+  const gap = Math.abs(a.startsAt - b.startsAt);
+  if (a.uid === b.uid && a.uid !== "") {
+    if (gap >= TWIN_WINDOW_MS) return false;
+    // A feed that reuses one UID for different meetings: their links tell them apart.
+    const meetingA = meetingKey(a.url);
+    const meetingB = meetingKey(b.url);
+    return meetingA === null || meetingB === null || meetingA === meetingB;
+  }
+  if (gap >= SAME_TIME_MS) return false;
+  if ((a.endsAt === null) !== (b.endsAt === null)) return false;
+  if (a.endsAt !== null && b.endsAt !== null && Math.abs(a.endsAt - b.endsAt) >= SAME_TIME_MS) return false;
+  const meeting = meetingKey(a.url);
+  return meeting !== null && meeting === meetingKey(b.url);
+}
+
+/** The other occurrences of the same meeting (see isTwinOccurrence). */
+export function twinOccurrences(repo: Repository, row: CalendarEventRow): CalendarEventRow[] {
+  return repo
+    .calendarEventsBetween(row.startsAt - TWIN_WINDOW_MS + 1, row.startsAt + TWIN_WINDOW_MS - 1)
+    .filter((other) => isTwinOccurrence(row, other));
+}
+
+/**
+ * A twin occurrence already has the bot: a scheduled one (while that twin
+ * still wants it: its own pass may cancel it), a live one, or one that ran or
+ * was stopped. Skipped twins are handled as a skip of this occurrence.
+ */
+function coveredByTwin(repo: Repository, twins: readonly CalendarEventRow[], filter: string): boolean {
+  for (const twin of twins) {
+    const meeting = linkedMeeting(repo, twin);
+    if (meeting === null || !claimsOccurrence(meeting)) continue;
+    if (meeting.status !== "scheduled") return true;
+    if (twin.status !== "cancelled" && twin.url !== null && matchesFilter(twin.title, filter)) return true;
+  }
+  return false;
+}
+
+/**
+ * A bot scheduled or started by hand (or by an agent) for this Zoom meeting
+ * at about this time. Calendar bots count through their occurrences
+ * (coveredByTwin), unless their occurrence is gone.
+ */
+function manualTwin(repo: Repository, url: string | null, scheduledAt: number, now: number): MeetingRow | null {
+  if (url === null) return null;
+  let parsed: ReturnType<typeof parseMeetingUrl>;
+  try {
+    parsed = parseMeetingUrl(url);
+  } catch {
+    return null;
+  }
+  if (parsed.platform !== "zoom") return null;
+  const candidates = repo.meetingsOf(parsed.platform, parsed.meetingNumber, parsed.url, ["scheduled", ...LIVE_STATUSES]);
+  return (
+    candidates.find((meeting) => {
+      if (meeting.source === "calendar" && meeting.calendarKey !== null && repo.calendarEvent(meeting.calendarKey) !== null) return false;
+      const at = meeting.status === "scheduled" ? (meeting.scheduledAt ?? meeting.createdAt) : (meeting.startedAt ?? now);
+      return Math.abs(at - scheduledAt) < TWIN_WINDOW_MS;
+    }) ?? null
+  );
+}
+
 /** Create, move or cancel the scheduled meeting for one occurrence. */
 export function applyAutoJoin(
   row: CalendarEventRow,
@@ -501,19 +636,20 @@ export function applyAutoJoin(
 ): { created?: string; cancelled?: string } | null {
   const { repo, now } = options;
   const meeting = linkedMeeting(repo, row);
-  const wanted =
-    row.status !== "cancelled" && !row.skipped && row.url !== null && matchesFilter(row.title, options.filter);
+  const twins = twinOccurrences(repo, row);
+  // Skipping the meeting in one calendar skips it in all (meetings.cancel marks only the bot's own occurrence).
+  const skipped = row.skipped || twins.some((twin) => twin.skipped);
+  const wanted = row.status !== "cancelled" && !skipped && row.url !== null && matchesFilter(row.title, options.filter);
   const scheduledAt = Math.max(0, row.startsAt - options.leadMinutes * 60_000);
 
-  // A cancelled bot (skipped, filtered out, event cancelled) is replaced when the occurrence is wanted again.
-  if (meeting !== null && meeting.status !== "cancelled") {
+  if (meeting !== null && claimsOccurrence(meeting)) {
     if (row.meetingId !== meeting.id) repo.setCalendarEventFields(row.key, { meetingId: meeting.id });
     if (meeting.status !== "scheduled") return null;
     if (!wanted || !options.autoJoin) {
       const reason =
         row.status === "cancelled"
           ? "Событие отменено в календаре"
-          : row.skipped
+          : skipped
             ? "Пропущено"
             : !options.autoJoin
               ? "Автоподключение к встречам из календаря выключено"
@@ -531,6 +667,8 @@ export function applyAutoJoin(
   }
   if (!options.autoJoin || !wanted) return null;
   if (row.startsAt < now - CALENDAR_PAST_MS) return null;
+  if (coveredByTwin(repo, twins, options.filter)) return null;
+  if (manualTwin(repo, joinableUrl(row.url), scheduledAt, now) !== null) return null;
   const createdMeeting = options.scheduleMeeting(row, scheduledAt);
   repo.setCalendarEventFields(row.key, { meetingId: createdMeeting.id });
   return { created: createdMeeting.id };
