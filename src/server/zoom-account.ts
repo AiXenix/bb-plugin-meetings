@@ -9,8 +9,8 @@ import { errorMessage } from "./errors.js";
 import type { MeetingsService } from "./service.js";
 import type { SettingsHandle } from "./settings.js";
 
-const SIGNIN_URL = "https://zoom.us/signin";
-const KV_SESSION = "zoom.session";
+export type BrowserAccountPlatform = "zoom" | "meet" | "telemost";
+const SIGNIN_URLS = { zoom: "https://zoom.us/signin", meet: "https://accounts.google.com/", telemost: "https://passport.yandex.ru/" } as const;
 /** The bot ends a login run by itself after 15 minutes. */
 const LOGIN_MAX_SEC = 15 * 60;
 /** Keep a finished session's outcome visible this long, then delete its directory. */
@@ -32,10 +32,19 @@ export class ZoomAccount {
     private readonly bb: BbPluginApi,
     private readonly settings: SettingsHandle,
     private readonly service: MeetingsService,
+    readonly platform: BrowserAccountPlatform = "zoom",
   ) {}
 
+  private get sessionKey(): string { return `${this.platform}.session`; }
+
+  private profile(action: "status" | "delete", hostId?: string, signal?: AbortSignal) {
+    return this.platform === "zoom"
+      ? this.service.call("zoom.profile", { action }, { hostId, signal })
+      : this.service.call("browser.profile", { platform: this.platform, action }, { hostId, signal });
+  }
+
   private async stored(): Promise<ZoomSession | null> {
-    return (await this.bb.storage.kv.get<ZoomSession>(KV_SESSION)) ?? null;
+    return (await this.bb.storage.kv.get<ZoomSession>(this.sessionKey)) ?? null;
   }
 
   private changed(): void {
@@ -55,7 +64,7 @@ export class ZoomAccount {
     const now = this.service.now();
     if (session.finishedAt !== null) {
       if (now - session.finishedAt <= KEEP_FINISHED_MS) return session;
-      await this.bb.storage.kv.delete(KV_SESSION);
+      await this.bb.storage.kv.delete(this.sessionKey);
       await this.service.call("meeting.delete", { meetingId: session.id }, { hostId: session.hostId, signal }).catch(() => undefined);
       this.changed();
       return null;
@@ -85,7 +94,7 @@ export class ZoomAccount {
       if (TERMINAL_BOT_PHASES.has(bot.phase) || !snapshot.botAlive) next.finishedAt = now;
     }
     if (JSON.stringify(next) !== JSON.stringify(session)) {
-      await this.bb.storage.kv.set(KV_SESSION, next);
+      await this.bb.storage.kv.set(this.sessionKey, next);
       this.changed();
     }
     return next;
@@ -101,14 +110,14 @@ export class ZoomAccount {
     const settings = await this.settings.get();
     let profile: ZoomStatus["profile"] = { exists: false, signedIn: false, updatedAt: null };
     try {
-      const result = await this.service.call("zoom.profile", { action: "status" });
+      const result = await this.profile("status");
       profile = { exists: result.exists, signedIn: result.signedIn, updatedAt: result.updatedAt };
     } catch (error) {
       this.bb.log.warn(`Could not read the Zoom profile: ${errorMessage(error)}`);
     }
     const session = await this.refresh().catch(() => null);
     return {
-      useZoomAccount: settings.useZoomAccount,
+      useZoomAccount: this.platform === "zoom" ? settings.useZoomAccount : this.platform === "meet" ? settings.useMeetAccount : settings.useTelemostAccount,
       profile,
       session: session === null ? null : { id: session.id, phase: session.phase, detail: session.detail, error: session.error },
     };
@@ -118,12 +127,12 @@ export class ZoomAccount {
     const existing = await this.refresh();
     if (existing !== null && existing.finishedAt === null) return this.status();
     if (existing !== null) {
-      await this.bb.storage.kv.delete(KV_SESSION);
+      await this.bb.storage.kv.delete(this.sessionKey);
       await this.service.call("meeting.delete", { meetingId: existing.id }, { hostId: existing.hostId }).catch(() => undefined);
     }
     const settings = await this.settings.get();
     const hostId = await this.service.primaryHostId();
-    const profile = await this.service.call("zoom.profile", { action: "status" }, { hostId });
+    const profile = await this.profile("status", hostId);
     const chromePath = await this.service.resolveChromePath(settings);
     const now = this.service.now();
     const id = newMeetingId(now);
@@ -131,9 +140,9 @@ export class ZoomAccount {
       version: 1,
       meetingId: id,
       mode: "login",
-      platform: "zoom",
-      url: SIGNIN_URL,
-      joinUrl: SIGNIN_URL,
+      platform: this.platform,
+      url: SIGNIN_URLS[this.platform],
+      joinUrl: SIGNIN_URLS[this.platform],
       meetingNumber: null,
       passcode: null,
       botName: settings.botName.trim().slice(0, 64) || "Notetaker",
@@ -145,7 +154,8 @@ export class ZoomAccount {
       chatAnnouncement: "",
       speakerSelectors: null,
       chromePath,
-      zoomProfileDir: profile.path,
+      zoomProfileDir: this.platform === "zoom" ? profile.path : null,
+      browserProfileDir: profile.path,
       avatar: false,
       avatarVideo: null,
       liveTranscription: false,
@@ -153,7 +163,7 @@ export class ZoomAccount {
       createdAt: now,
     } satisfies BotConfig);
     await this.service.call("meeting.start", { config }, { hostId, timeoutMs: 60_000 });
-    await this.bb.storage.kv.set(KV_SESSION, {
+    await this.bb.storage.kv.set(this.sessionKey, {
       id,
       hostId,
       startedAt: now,
@@ -184,9 +194,9 @@ export class ZoomAccount {
         await this.service.call("meeting.stop", { meetingId: session.id }, { hostId: session.hostId }).catch(() => undefined);
       }
       await this.service.call("meeting.delete", { meetingId: session.id }, { hostId: session.hostId }).catch(() => undefined);
-      await this.bb.storage.kv.delete(KV_SESSION);
+      await this.bb.storage.kv.delete(this.sessionKey);
     }
-    await this.service.call("zoom.profile", { action: "delete" });
+    await this.profile("delete");
     this.changed();
     return this.status();
   }

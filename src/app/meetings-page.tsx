@@ -6,6 +6,7 @@ import { ListPage } from "./list-page";
 import { parseRoute, useMeetingsNav } from "./route";
 import { EmptyState, PageFrame } from "./ui";
 import { ZoomLoginPage } from "./zoom-login-page";
+import { AccountLoginPage } from "./accounts-panel";
 
 export function MeetingsPage({ subPath }: PluginNavPanelProps) {
   const nav = useMeetingsNav();
@@ -15,6 +16,8 @@ export function MeetingsPage({ subPath }: PluginNavPanelProps) {
       return <ListPage nav={nav} />;
     case "zoom-login":
       return <ZoomLoginPage nav={nav} />;
+    case "account-login":
+      return <AccountLoginPage platform={route.platform} nav={nav} />;
     case "detail":
       return <DetailPage key={route.id} id={route.id} segmentId={route.segmentId} nav={nav} />;
     case "unknown":

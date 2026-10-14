@@ -6,7 +6,7 @@ import { z } from "zod";
 export const MEETING_ID_PATTERN = /^mtg_[a-z0-9]{6,32}$/;
 export const meetingIdSchema = z.string().regex(MEETING_ID_PATTERN, "Invalid meeting id");
 
-export const PLATFORMS = ["zoom", "mock"] as const;
+export const PLATFORMS = ["zoom", "meet", "telemost", "jitsi", "mock"] as const;
 export const platformSchema = z.enum(PLATFORMS);
 export type Platform = z.infer<typeof platformSchema>;
 
@@ -58,6 +58,8 @@ export const botConfigSchema = z
      * mode=meeting copies it into the meeting's own profile dir when set. null = fresh guest profile.
      */
     zoomProfileDir: z.string().nullable(),
+    /** Platform account profile copied into a meeting's temporary browser profile; legacy Zoom configs use zoomProfileDir. */
+    browserProfileDir: z.string().nullable().optional(),
     /** Show the bot's avatar as its camera (server sets it from settings; the host renders the video). */
     avatar: z.boolean().default(false),
     /**
@@ -66,6 +68,8 @@ export const botConfigSchema = z
      */
     avatarVideo: z.string().nullable().default(null),
     liveTranscription: z.boolean(),
+    /** false records audio without starting either the live or final transcriber. */
+    autoTranscribe: z.boolean().optional(),
     transcriber: transcriberConfigSchema,
     createdAt: z.number().int(),
   })
@@ -102,6 +106,7 @@ export const BOT_ERROR_CODES = [
   "browser_crashed",
   "dependency_missing",
   "join_failed",
+  "join_rejected",
   "recording_failed",
   "unknown",
 ] as const;

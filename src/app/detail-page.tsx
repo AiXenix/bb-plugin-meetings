@@ -49,7 +49,9 @@ import {
   StatusChip,
 } from "./ui";
 import { useSegments } from "./use-segments";
-import { useZoomLoginStart } from "./zoom-card";
+import { ACCOUNT_LABELS } from "./accounts-panel";
+import { AnalysisPanel } from "./analysis-panel";
+import { AskPanel } from "./ask-panel";
 
 const NO_NAMES: Readonly<Record<string, string>> = {};
 
@@ -283,7 +285,11 @@ export function DetailPage({ id, segmentId, nav }: { id: string; segmentId: numb
   const [logsOpen, setLogsOpen] = useState(false);
   const [dumpMessage, setDumpMessage] = useState<string | null>(null);
   const logsId = useId();
-  const zoomLogin = useZoomLoginStart(nav);
+  const zoomLogin = useAsyncAction(async () => {
+    const platform = meeting?.platform;
+    if (platform === "zoom") { await rpc.call("zoom.loginStart"); nav.toZoomLogin(); }
+    else if (platform === "meet" || platform === "telemost") { await rpc.call("accounts.loginStart", { platform }); nav.toAccountLogin?.(platform); }
+  });
 
   const stop = useAsyncAction(async () => {
     await rpc.call("meetings.stop", { id });
@@ -302,6 +308,10 @@ export function DetailPage({ id, segmentId, nav }: { id: string; segmentId: numb
   // A failed or cancelled meeting can be retried with the same link (e.g. after signing in to Zoom);
   // a cancelled one that has not started yet is scheduled again for its time.
   const rejoin = useAsyncAction(async (source: MeetingDetail) => {
+    if (source.status === "failed") {
+      nav.toMeeting((await rpc.call("meetings.retry", { id: source.id })).meeting.id);
+      return;
+    }
     const minutes = source.maxDurationMinutes;
     const { meeting: next } = await rpc.call("meetings.join", {
       url: source.url,
@@ -444,14 +454,14 @@ export function DetailPage({ id, segmentId, nav }: { id: string; segmentId: numb
           {meeting.errorCode !== null && meeting.errorMessage !== null && meeting.errorMessage !== "" ? (
             <p className="break-words text-xs text-muted-foreground">{meeting.errorMessage}</p>
           ) : null}
-          {meeting.errorCode !== null && ZOOM_LOGIN_ERRORS.has(meeting.errorCode) ? (
+          {meeting.errorCode !== null && ZOOM_LOGIN_ERRORS.has(meeting.errorCode) && (meeting.platform === "zoom" || meeting.platform === "meet" || meeting.platform === "telemost") ? (
             <div className="flex flex-wrap items-center gap-2">
               <Button type="button" size="sm" disabled={zoomLogin.pending} onClick={() => void zoomLogin.run()}>
                 {zoomLogin.pending ? <Spinner /> : <Icon name="SquareUnlock02" className="size-4" aria-hidden />}
-                Войти в Zoom
+                Войти в {ACCOUNT_LABELS[meeting.platform]}
               </Button>
               <span className="text-xs text-muted-foreground">
-                После входа включите <code className="font-mono">useZoomAccount</code> и запустите бота снова.
+                После входа включите использование аккаунта в настройках и подключите бота снова.
               </span>
             </div>
           ) : null}
@@ -575,6 +585,8 @@ export function DetailPage({ id, segmentId, nav }: { id: string; segmentId: numb
       {hasContent && (!live || (meeting.summaryMd ?? "") !== "") ? (
         <SummaryPanel meeting={meeting} onSaved={refetch} />
       ) : null}
+      {segments.segments.length > 0 && !live ? <AnalysisPanel id={id} onSaved={refetch} onSeek={meeting.hasAudio ? onSeek : null} /> : null}
+      {segments.segments.length > 0 ? <AskPanel id={id} nav={nav} /> : null}
       {hasContent ? <SpeakersPanel meetingId={id} stats={stats} colors={colors} onRenamed={onRenamed} /> : null}
       <TranscriptView
         segments={segments.segments}

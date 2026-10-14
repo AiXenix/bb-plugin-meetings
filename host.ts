@@ -118,6 +118,10 @@ const handlers: ExperimentalHostRpcHandlers<typeof hostContract> = {
     const paths = pathsFor(context.experimental_paths.dataDir);
     return action === "delete" ? deleteZoomProfile(paths) : zoomProfileStatus(paths);
   },
+  "browser.profile": async ({ platform, action }, context) => {
+    const paths = pathsFor(context.experimental_paths.dataDir);
+    return action === "delete" ? deleteZoomProfile(paths, platform) : zoomProfileStatus(paths, platform);
+  },
 
   "bot.avatar": async (input, context) => avatarAction(pathsFor(context.experimental_paths.dataDir), input, context.signal),
 

@@ -14,6 +14,7 @@ import { CHANNEL_BOT_CHANGED, avatarPreviewUrl } from "./constants";
 import { useAsyncAction, useDebouncedCallback, useLatest, useMountedRef, useOnReconnect } from "./hooks";
 import { messageOf, useMeetingsRpc } from "./rpc";
 import { ErrorText, InlineTextInput, Section, Spinner } from "./ui";
+import { AvatarGenerator } from "./avatar-generator";
 
 /** bot.updateProfile limit for botName. */
 const BOT_NAME_MAX = 64;
@@ -86,7 +87,7 @@ function BotNameEditor({ profile, onProfile }: { profile: BotProfile; onProfile:
         >
           <InlineTextInput
             initial={profile.botName}
-            label="Имя бота в Zoom"
+            label="Имя бота во встрече"
             maxLength={BOT_NAME_MAX}
             className="max-w-xs"
             onCommit={(value) => {
@@ -152,7 +153,7 @@ function AvatarPreview({ profile, dragging, busy }: { profile: BotProfile; dragg
         <img
           key={src}
           src={src}
-          alt={`Камера бота в Zoom: аватар и имя «${profile.botName}»`}
+          alt={`Камера бота: аватар и имя «${profile.botName}»`}
           className="size-full object-cover"
           draggable={false}
           onLoad={() => setLoadedSrc(src)}
@@ -334,7 +335,7 @@ export function BotCard() {
                     onCheckedChange={(checked) => void toggle.run(checked === true)}
                   />
                   <label htmlFor={toggleId} className="cursor-pointer select-none text-foreground">
-                    Показывать аватар в Zoom (камера бота)
+                    Показывать аватар во встречах (камера бота)
                   </label>
                   {toggle.pending ? <Spinner className="size-3.5 text-muted-foreground" /> : null}
                 </div>
@@ -349,6 +350,7 @@ export function BotCard() {
                 </p>
                 <ErrorText className="text-xs">{toggle.error}</ErrorText>
               </div>
+              <AvatarGenerator name={profile.botName} onApplied={update} />
             </div>
           </div>
         )}

@@ -1,5 +1,4 @@
-// Parse the meeting links people paste (Zoom invite links, web-client links,
-// zoommtg:// deep links, bare meeting numbers) into what the bot needs.
+// Parse supported meeting links and Zoom meeting numbers into bot entry URLs.
 // Pure: used by the server, the host and tests.
 import type { Platform } from "./runtime-files.js";
 
@@ -24,6 +23,13 @@ export const ZOOM_WEB_CLIENT_ORIGIN = "https://app.zoom.us";
 
 const ZOOM_HOST = /(^|\.)zoom\.(us|com)$|(^|\.)zoomgov\.com$/i;
 const MEETING_NUMBER = /^\d{9,11}$/;
+const TELEMOST_HOST = /^telemost\.(?:360\.)?yandex\.(?:ru|com|com\.tr|kz|by|uz)$/i;
+const JITSI_HOST = /(^|[.-])jitsi([.-]|$)/i;
+
+/** Known Jitsi domains can be detected; other self-hosted installations need an explicit platform. */
+export interface MeetingUrlOptions {
+  readonly platform?: Platform;
+}
 
 function isZoomHost(hostname: string): boolean {
   return ZOOM_HOST.test(hostname);
@@ -70,7 +76,7 @@ function isMockUrl(url: URL): boolean {
   );
 }
 
-export function parseMeetingUrl(input: string): ParsedMeetingUrl {
+export function parseMeetingUrl(input: string, options: MeetingUrlOptions = {}): ParsedMeetingUrl {
   const raw = input.trim();
   if (raw === "") throw new MeetingUrlError("Пустая ссылка на встречу");
 
@@ -119,12 +125,33 @@ export function parseMeetingUrl(input: string): ParsedMeetingUrl {
   if (url.protocol !== "https:" && url.protocol !== "http:") {
     throw new MeetingUrlError(`Неподдерживаемая схема ссылки: ${url.protocol}`);
   }
+  if (url.username || url.password) throw new MeetingUrlError("Ссылка на встречу не должна содержать логин или пароль сайта");
+  if (url.protocol === "http:") url.protocol = "https:";
+  if (url.hostname === "meet.google.com") {
+    if (!/^\/(?:[a-z]{3}-[a-z]{4}-[a-z]{3}|lookup\/[a-z0-9_-]+)\/?$/i.test(url.pathname)) {
+      throw new MeetingUrlError("Нужна действующая ссылка Google Meet с кодом встречи");
+    }
+    url.pathname = url.pathname.replace(/\/$/, "");
+    return { platform: "meet", url: raw, joinUrl: url.toString(), meetingNumber: null, passcode: null, kind: "meeting" };
+  }
+  if (TELEMOST_HOST.test(url.hostname)) {
+    const room = /^\/(?:j|private-join)\/([a-z0-9_-]{6,256})\/?$/i.exec(url.pathname);
+    if (!room) throw new MeetingUrlError("Нужна ссылка Яндекс Телемост вида https://telemost.yandex.ru/j/<код>");
+    url.pathname = `/j/${room[1]}`;
+    return { platform: "telemost", url: raw, joinUrl: url.toString(), meetingNumber: null, passcode: null, kind: "meeting" };
+  }
+  if (url.hostname === "meet.jit.si" || JITSI_HOST.test(url.hostname) || options.platform === "jitsi") {
+    if (url.pathname === "/" || !url.pathname.split("/").filter(Boolean).length) {
+      throw new MeetingUrlError("В ссылке Jitsi Meet должно быть имя комнаты");
+    }
+    url.pathname = url.pathname.replace(/\/+$/, "");
+    return { platform: "jitsi", url: raw, joinUrl: url.toString(), meetingNumber: null, passcode: null, kind: "meeting" };
+  }
   // zoom.com links are the same meetings on zoom.us.
   if (/(^|\.)zoom\.com$/i.test(url.hostname)) url.hostname = url.hostname.replace(/zoom\.com$/i, "zoom.us");
-  if (url.protocol === "http:") url.protocol = "https:";
   if (!isZoomHost(url.hostname)) {
     throw new MeetingUrlError(
-      `Поддерживаются только ссылки Zoom (zoom.us, zoom.com, zoomgov.com); получено: ${url.hostname}`,
+      `Поддерживаются ссылки Zoom, Google Meet, Яндекс Телемост и Jitsi Meet; получено: ${url.hostname}`,
     );
   }
   // Zoom Events join links redirect to the web client by themselves.
@@ -202,23 +229,50 @@ export function parseMeetingUrl(input: string): ParsedMeetingUrl {
   );
 }
 
+/** Stable meeting identity independent of tracking, passwords and regional Telemost entry points. */
+export function meetingIdentity(input: string | ParsedMeetingUrl): string {
+  const parsed = typeof input === "string" ? parseMeetingUrl(input) : input;
+  if (parsed.platform === "zoom" && parsed.meetingNumber !== null) {
+    const cloud = /zoomgov\.com/i.test(parsed.joinUrl) ? "gov" : "public";
+    return `zoom:${cloud}:${parsed.meetingNumber}`;
+  }
+  const url = new URL(parsed.joinUrl);
+  const pathname = url.pathname.replace(/\/+$/, "");
+  if (parsed.platform === "telemost") return `telemost:${pathname.split("/").at(-1)}`;
+  if (parsed.platform === "meet") return `meet:${pathname.toLowerCase()}`;
+  if (parsed.platform === "jitsi") return `jitsi:${url.host.toLowerCase()}${pathname.toLowerCase()}`;
+  if (parsed.platform === "zoom") return `zoom:${url.host.toLowerCase()}${pathname.toLowerCase()}`;
+  return `mock:${url.origin}${pathname}${url.search}`;
+}
+
+/** Canonical join entry; preserves admission credentials while removing cosmetic fragments. */
+export function normalizeMeetingUrl(input: string): string {
+  const parsed = parseMeetingUrl(input);
+  const url = new URL(parsed.joinUrl);
+  if (parsed.platform !== "jitsi") url.hash = "";
+  for (const key of [...url.searchParams.keys()]) {
+    if (/^(?:utm_.+|ref_from|ref|source)$/i.test(key)) url.searchParams.delete(key);
+  }
+  return url.toString();
+}
+
 /** Find meeting links in free text (calendar descriptions, chat messages). */
 export function extractMeetingUrls(text: string): string[] {
-  const found = new Set<string>();
-  const pattern = /\b(?:https?:\/\/)?(?:[a-z0-9-]+\.)*(?:zoom\.us|zoom\.com|zoomgov\.com)\/(?:j|w|s|my|wc)\/[^\s<>"')\]]+|zoommtg:\/\/[^\s<>"')\]]+/gi;
+  const found = new Map<string, string>();
+  const pattern = /\b(?:https?:\/\/)?(?:[a-z0-9-]+\.)*(?:zoom\.us|zoom\.com|zoomgov\.com|meet\.google\.com|telemost\.(?:360\.)?yandex\.(?:com\.tr|ru|com|kz|by|uz)|meet\.jit\.si|[a-z0-9.-]*jitsi[a-z0-9.-]*)\/[^\s<>"')\]]+|zoom(?:mtg|us):\/\/[^\s<>"')\]]+/gi;
   for (const match of text.matchAll(pattern)) {
     const candidate = match[0].replace(/[.,;:!?]+$/, "");
     try {
-      parseMeetingUrl(candidate);
-      found.add(candidate);
+      const identity = meetingIdentity(candidate);
+      if (!found.has(identity)) found.set(identity, candidate);
     } catch {
       // not a joinable link
     }
   }
-  return [...found];
+  return [...found.values()];
 }
 
 /** The link with its passcode hidden, for logs and agent-visible output. */
 export function maskMeetingUrl(input: string): string {
-  return input.replace(/([?&](?:pwd|password|tk)=)[^&#\s]+/gi, "$1***");
+  return input.replace(/([?&#](?:pwd|password|tk|token|jwt|access_token)=)[^&#\s]+/gi, "$1***");
 }

@@ -196,7 +196,7 @@ describe("Google Calendar sync through the plugin", () => {
     const cli = await loaded.harness.behavior.runCli(["google", "status"]);
     expect(cli.stdout).toContain(`Google Calendar: connected as ${PRIMARY}`);
     expect(cli.stdout).toContain(`Watched calendars: ${PRIMARY} (primary) [1 of 2]`);
-    expect(cli.stdout).toContain("Upcoming Zoom meetings in the next 24 h: 2");
+    expect(cli.stdout).toContain("Upcoming meetings in the next 24 h: 2");
   });
 
   it("keeps known events and bots when Google fails, and drops removed events once it works again", async () => {

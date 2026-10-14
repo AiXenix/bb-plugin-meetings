@@ -10,13 +10,12 @@ import type { MeetingsNav } from "./route";
 import { EmptyState, ErrorText, Notice, PageFrame, Spinner } from "./ui";
 import { sessionProblem, sessionRunning, useZoomStatus } from "./zoom-card";
 
-const ENABLE_COMMAND = "bb plugin config meetings set useZoomAccount true";
-
 export function ZoomLoginPage({ nav }: { nav: MeetingsNav }) {
   const rpc = useMeetingsRpc();
   const { status, error, update } = useZoomStatus(2000);
   const start = useAsyncAction(async () => update(await rpc.call("zoom.loginStart")));
   const finish = useAsyncAction(async () => update(await rpc.call("zoom.loginFinish")));
+  const enable = useAsyncAction(async () => { await rpc.call("notetaker.settings", { patch: { useZoomAccount: true } }); if (status) update({ ...status, useZoomAccount: true }); });
   const session = status?.session ?? null;
   // A finished session stays in zoom.status for a while to show how it ended; only a running one has a live view.
   const running = session !== null && sessionRunning(session);
@@ -79,10 +78,7 @@ export function ZoomLoginPage({ nav }: { nav: MeetingsNav }) {
           {status.useZoomAccount ? (
             <p className="text-muted-foreground">Боты будут подключаться к встречам под этим аккаунтом.</p>
           ) : (
-            <p className="text-muted-foreground">
-              Чтобы боты подключались под этим аккаунтом, включите настройку:{" "}
-              <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">{ENABLE_COMMAND}</code>
-            </p>
+            <Button type="button" size="sm" disabled={enable.pending} onClick={() => void enable.run()}>Использовать для встреч</Button>
           )}
           <div className="flex flex-wrap gap-2">
             <Button type="button" size="sm" onClick={() => nav.toList()}>
@@ -93,7 +89,7 @@ export function ZoomLoginPage({ nav }: { nav: MeetingsNav }) {
               Войти заново
             </Button>
           </div>
-          <ErrorText>{start.error}</ErrorText>
+          <ErrorText>{start.error ?? enable.error}</ErrorText>
         </Notice>
       ) : (
         <Notice

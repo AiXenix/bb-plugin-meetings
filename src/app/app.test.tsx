@@ -129,6 +129,9 @@ function baseHandlers(overrides: Handlers = {}): Handlers {
     "calendar.status": () => NO_CALENDAR,
     "bot.profile": () => BOT_PROFILE,
     "google.status": () => NO_GOOGLE,
+    "notetaker.settings": () => ({ settings: {} }),
+    "accounts.status": () => ({ accounts: [] }),
+    "meetings.analysis": () => ({ analysis: null, mode: "agent", templateId: "executive", templates: [], prompt: null }),
     ...overrides,
   };
 }
@@ -142,6 +145,12 @@ async function renderPage(subPath: string, rpc: Handlers): Promise<RenderedSlot>
 
 const callsTo = (slot: RenderedSlot, method: string) =>
   slot.inspection.rpcCalls.filter((call) => call.method === method).map((call) => call.input);
+
+async function openSettings(tab: string) {
+  const details = screen.getByText("Настройки бота, разбора и интеграций").closest("details")!;
+  act(() => { details.open = true; fireEvent(details, new Event("toggle")); });
+  fireEvent.click(await screen.findByRole("tab", { name: tab }));
+}
 
 describe("list page", () => {
   it("shows live, scheduled and past meetings, the environment banner and the Zoom card", async () => {
@@ -286,8 +295,9 @@ describe("list page", () => {
     expect(callsTo(slot, "env.setup")).toEqual([{ force: false }]);
 
     // Zoom account card
-    expect(screen.getByText("Вход в Zoom не выполнен")).toBeTruthy();
-    expect(screen.getByText("bb plugin config meetings set useZoomAccount true")).toBeTruthy();
+    await openSettings("Аккаунты");
+    expect(await screen.findByText("Вход в Zoom не выполнен")).toBeTruthy();
+    expect(screen.getByRole("checkbox", { name: "Использовать Zoom-аккаунт для встреч" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Войти в Zoom" }));
     await waitFor(() =>
       expect(slot.inspection.navigateCalls).toContainEqual({
@@ -308,14 +318,14 @@ describe("list page", () => {
       },
     });
     const slot = await renderPage("", rpc);
-    const link = await screen.findByRole("textbox", { name: "Ссылка на Zoom-встречу" });
+    const link = await screen.findByRole("textbox", { name: "Ссылка на встречу" });
     const submit = screen.getByRole("button", { name: "Подключить бота" });
 
     fireEvent.click(submit);
-    expect((await screen.findByRole("alert")).textContent).toBe("Вставьте ссылку на Zoom-встречу");
-    fireEvent.change(link, { target: { value: "https://meet.google.com/abc-defg-hij" } });
+    expect((await screen.findByRole("alert")).textContent).toBe("Вставьте ссылку на встречу");
+    fireEvent.change(link, { target: { value: "https://example.com/abc-defg-hij" } });
     fireEvent.click(submit);
-    expect((await screen.findByRole("alert")).textContent).toMatch(/Поддерживаются только ссылки Zoom/);
+    expect((await screen.findByRole("alert")).textContent).toMatch(/Поддерживаются ссылки Zoom, Google Meet/);
     expect(callsTo(slot, "meetings.join")).toEqual([]);
 
     fireEvent.change(link, { target: { value: "https://us02web.zoom.us/j/81234567890?pwd=abc" } });
@@ -683,7 +693,7 @@ describe("failed meeting", () => {
     const rpc = baseHandlers({
       "meetings.get": () => ({ meeting }),
       "meetings.segments": () => ({ segments: [], final: false, lastId: -1, total: 0 }),
-      "meetings.join": () => ({ meeting: summary("mtg_retry1", { status: "joining" }) }),
+      "meetings.retry": () => ({ meeting: summary("mtg_retry1", { status: "joining" }) }),
       "zoom.loginStart": () => ({
         ...NO_ZOOM,
         session: { id: "mtg_login01", phase: "starting", detail: "", error: null },
@@ -691,7 +701,7 @@ describe("failed meeting", () => {
     });
     const slot = await renderPage("mtg_fail01", rpc);
     const alert = await screen.findByRole("alert");
-    expect(within(alert).getByText("Встреча только для авторизованных пользователей Zoom")).toBeTruthy();
+    expect(within(alert).getByText("Для этой встречи нужен вход в аккаунт")).toBeTruthy();
     expect(within(alert).getByText("This meeting is for authorized attendees only")).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Саммари" })).toBeNull();
     expect(screen.queryByRole("heading", { name: /Спикеры/ })).toBeNull();
@@ -700,15 +710,7 @@ describe("failed meeting", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Подключить снова" }));
     await waitFor(() =>
-      expect(callsTo(slot, "meetings.join")).toEqual([
-        {
-          url: meeting.url,
-          title: "Звонок с клиентом",
-          botName: "Notetaker",
-          scheduledAt: null,
-          maxDurationMinutes: 240,
-        },
-      ]),
+      expect(callsTo(slot, "meetings.retry")).toEqual([{ id: meeting.id }]),
     );
     await waitFor(() =>
       expect(slot.inspection.navigateCalls).toContainEqual({
@@ -865,6 +867,7 @@ describe("zoom sign-in page", () => {
     slot.lifecycle.unmount();
 
     const list = await renderPage("", rpc);
+    await openSettings("Аккаунты");
     expect(await screen.findByText("Вход не выполнен: Время сеанса входа истекло")).toBeTruthy();
     expect(screen.queryByText(/Идёт сеанс входа/)).toBeNull();
     expect(screen.queryByRole("button", { name: "Открыть сеанс входа" })).toBeNull();

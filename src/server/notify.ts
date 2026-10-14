@@ -24,7 +24,9 @@ export function notificationText(row: MeetingRow, summaryPrompt: string): string
   const lines: string[] = [];
   const link = maskMeetingUrl(row.url);
   if (row.status === "done") {
-    lines.push(`Встреча «${row.title}» (${row.id}) записана и расшифрована.`);
+    lines.push(row.options.autoTranscribe === false
+      ? `Встреча «${row.title}» (${row.id}) записана. Распознавание было выключено.`
+      : `Встреча «${row.title}» (${row.id}) записана и расшифрована.`);
     const facts = [`Длительность: ${humanDuration(row.durationSec)}.`];
     const speakers = speakerLine(row);
     if (speakers !== null) facts.push(speakers);
@@ -33,7 +35,9 @@ export function notificationText(row: MeetingRow, summaryPrompt: string): string
     if (row.errorCode !== null) {
       lines.push(`Запись прервалась раньше времени: ${explainError(row.errorCode)}. Транскрипт содержит то, что успели записать.`);
     }
-    if (row.segmentsCount === 0) {
+    if (row.options.autoTranscribe === false) {
+      lines.push(`Аудиозапись доступна на странице встречи; распознать позже: \`bb meetings retranscribe ${row.id}\`.`);
+    } else if (row.segmentsCount === 0) {
       // Nothing to summarize: don't ask the agent for a summary of silence.
       lines.push("Речь не распознана: транскрипт пуст (в эфире было тихо или бот не слышал звук встречи).");
     } else {

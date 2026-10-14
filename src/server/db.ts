@@ -130,6 +130,10 @@ export function newMeetingId(now = Date.now()): string {
 /** Per-meeting overrides of the global settings. */
 export interface MeetingOptions {
   maxDurationMinutes?: number;
+  templateId?: string;
+  autoTranscribe?: boolean;
+  autoSummarize?: boolean;
+  chatAnnouncement?: string;
   /** import: the source file on the host. */
   sourcePath?: string;
   /** startedAt of the last failed transcriber run already counted in transcriberFailures. */

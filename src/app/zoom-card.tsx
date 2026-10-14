@@ -12,6 +12,7 @@ import { botDetailText, loginPhaseText } from "./labels";
 import { messageOf, useMeetingsRpc } from "./rpc";
 import type { MeetingsNav } from "./route";
 import { ConfirmDialog, ErrorText, Section, Spinner } from "./ui";
+import { Toggle } from "./feature-controls";
 
 type ZoomSession = NonNullable<ZoomStatus["session"]>;
 
@@ -82,6 +83,10 @@ export function ZoomAccountCard({ nav }: { nav: MeetingsNav }) {
     update(await rpc.call("zoom.logout"));
     setConfirmLogout(false);
   });
+  const toggle = useAsyncAction(async (useZoomAccount: boolean) => {
+    await rpc.call("notetaker.settings", { patch: { useZoomAccount } });
+    if (status) update({ ...status, useZoomAccount });
+  });
   return (
     <Section title="Аккаунт Zoom">
       <div className="space-y-3 rounded-lg border border-border bg-card p-4 text-sm">
@@ -124,21 +129,8 @@ export function ZoomAccountCard({ nav }: { nav: MeetingsNav }) {
                     ? "Боты подключаются к встречам под этим аккаунтом Zoom."
                     : "Боты подключаются как гости, без аккаунта."}
                 </p>
-                {status.useZoomAccount ? (
-                  status.profile.signedIn ? null : (
-                    <p className="text-warning-text">
-                      Настройка useZoomAccount включена, но вход не выполнен — войдите, иначе боты пойдут гостями.
-                    </p>
-                  )
-                ) : (
-                  <p className="text-xs text-muted-foreground">
-                    Zoom может не пускать гостевых ботов. Чтобы боты входили под аккаунтом, войдите и включите
-                    настройку:{" "}
-                    <code className="rounded bg-muted px-1 py-0.5 font-mono">
-                      bb plugin config meetings set useZoomAccount true
-                    </code>
-                  </p>
-                )}
+                <Toggle label="Использовать Zoom-аккаунт для встреч" checked={status.useZoomAccount} disabled={toggle.pending} onChange={enabled => void toggle.run(enabled)} />
+                {status.useZoomAccount && !status.profile.signedIn ? <p className="text-xs text-warning-text">Войдите в аккаунт, иначе бот подключится как гость.</p> : null}
               </div>
             </div>
             {running ? (
@@ -164,7 +156,7 @@ export function ZoomAccountCard({ nav }: { nav: MeetingsNav }) {
                 </Button>
               ) : null}
             </div>
-            <ErrorText>{login.error}</ErrorText>
+            <ErrorText>{login.error ?? toggle.error}</ErrorText>
           </>
         )}
       </div>

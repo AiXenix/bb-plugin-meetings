@@ -3,6 +3,8 @@
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { envReportSchema } from "./contract.js";
+import { meetingAnalysisSchema, summaryTemplateSchema, summaryTemplateInputSchema, summaryTemplateIdSchema, askCitationSchema, templateSnapshotSchema } from "./analysis.js";
+import { notetakerSettingsPatchSchema, notetakerSettingsViewSchema, accountPlatformSchema, browserAccountSchema, agentTokenStatusSchema, agentMetaSchema } from "./notetaker-settings.js";
 import {
   CONTROL_ACTIONS,
   botErrorCodeSchema,
@@ -313,11 +315,59 @@ export const rpcContract = defineRpcContract({
         /** Epoch ms; null = now. */
         scheduledAt: z.number().nullable().default(null),
         maxDurationMinutes: z.number().int().min(5).max(1440).nullable().default(null),
+        platform: z.enum(["zoom", "meet", "telemost", "jitsi"]).optional(),
+        templateId: summaryTemplateIdSchema.optional(),
+        autoTranscribe: z.boolean().optional(),
+        autoSummarize: z.boolean().optional(),
+        chatAnnouncement: z.string().max(1000).optional(),
       })
       .strict(),
     output: meetingOutput,
   },
   "meetings.stop": { input: idInput, output: meetingOutput },
+  "meetings.retry": { input: idInput, output: meetingOutput },
+  "meetings.import": {
+    input: z.object({ sourcePath: z.string().trim().min(1).max(4096), title: z.string().trim().max(200).nullable().optional() }).strict(),
+    output: meetingOutput,
+  },
+  "notetaker.settings": {
+    input: z.object({ patch: notetakerSettingsPatchSchema.optional() }).strict(),
+    output: z.object({ settings: notetakerSettingsViewSchema }),
+  },
+  "templates.list": { input: z.object({}).strict(), output: z.object({ templates: z.array(summaryTemplateSchema) }) },
+  "templates.save": {
+    input: summaryTemplateInputSchema.extend({ id: summaryTemplateIdSchema.optional(), copyFrom: summaryTemplateIdSchema.optional() }),
+    output: z.object({ template: summaryTemplateSchema }),
+  },
+  "templates.delete": { input: z.object({ id: summaryTemplateIdSchema }).strict(), output: z.object({ deleted: z.boolean() }) },
+  "meetings.analysis": {
+    input: idInput,
+    output: z.object({ analysis: meetingAnalysisSchema.nullable(), mode: z.enum(["agent", "api"]), templateId: z.string(), templates: z.array(summaryTemplateSchema), prompt: z.string().nullable() }),
+  },
+  "meetings.analyze": {
+    input: idInput.extend({ templateId: summaryTemplateIdSchema.optional() }),
+    output: z.object({ analysis: meetingAnalysisSchema.nullable(), needsAgent: z.boolean(), prompt: z.string().nullable() }),
+  },
+  "meetings.saveInsights": {
+    input: idInput.extend({ insights: z.unknown(), templateId: summaryTemplateIdSchema.optional(), templateSnapshot: templateSnapshotSchema.optional() }),
+    output: z.object({ analysis: meetingAnalysisSchema }),
+  },
+  "meetings.actionItem": {
+    input: idInput.extend({ itemId: z.string().min(1).max(100), done: z.boolean() }),
+    output: z.object({ analysis: meetingAnalysisSchema }),
+  },
+  "meetings.ask": {
+    input: z.object({ question: z.string().trim().min(1).max(2000), id: meetingIdSchema.optional(), meetingIds: z.array(meetingIdSchema).max(50).optional(), query: z.string().max(200).optional() }).strict(),
+    output: z.object({ answer: z.string(), citations: z.array(askCitationSchema), needsAgent: z.boolean(), prompt: z.string().nullable() }).passthrough(),
+  },
+  "accounts.status": { input: z.object({}).strict(), output: z.object({ accounts: z.array(browserAccountSchema) }) },
+  "accounts.loginStart": { input: z.object({ platform: accountPlatformSchema }).strict(), output: z.object({ account: browserAccountSchema }) },
+  "accounts.loginFinish": { input: z.object({ platform: accountPlatformSchema }).strict(), output: z.object({ account: browserAccountSchema }) },
+  "accounts.logout": { input: z.object({ platform: accountPlatformSchema }).strict(), output: z.object({ account: browserAccountSchema }) },
+  "agent.meta": { input: z.object({}).strict(), output: agentMetaSchema },
+  "agent.tokenStatus": { input: z.object({}).strict(), output: agentTokenStatusSchema },
+  "agent.tokenCreate": { input: z.object({}).strict(), output: z.object({ token: z.string(), createdAt: z.number() }) },
+  "agent.tokenRevoke": { input: z.object({}).strict(), output: agentTokenStatusSchema },
   "meetings.cancel": { input: idInput, output: meetingOutput },
   "meetings.retranscribe": { input: idInput, output: meetingOutput },
   "meetings.delete": { input: idInput, output: z.object({ deleted: z.boolean() }).strict() },

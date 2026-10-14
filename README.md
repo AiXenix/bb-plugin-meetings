@@ -1,8 +1,8 @@
 # Meetings for bb
 
-**A Zoom notetaker for [bb](https://getbb.app) with local Russian transcription by [GigaAM v3](https://github.com/salute-developers/GigaAM).**
+**A multi-platform notetaker for [bb](https://getbb.app) with local Russian transcription by [GigaAM v3](https://github.com/salute-developers/GigaAM).**
 
-Give an agent a Zoom link. A bot named "Notetaker" joins the meeting through the Zoom web client, records it, and transcribes it while the meeting runs. The transcript is split by speaker and named after the Zoom participants. Recording, speech recognition and storage all run on your machine, with no Zoom API keys or cloud transcription service. Agents can still read the transcripts; see [Privacy](#privacy).
+Give an agent a Zoom, Google Meet, Telemost or Jitsi link. A bot named "Notetaker" joins through the platform’s browser client, records it, and transcribes it while the meeting runs. The transcript is split by speaker and named after the Zoom participants. Recording, speech recognition and storage all run on your machine, with no Zoom API keys or cloud transcription service. Agents can still read the transcripts; see [Privacy](#privacy).
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![bb plugin](https://img.shields.io/badge/bb-plugin-6f42c1.svg)](https://getbb.app)
@@ -30,11 +30,16 @@ Screenshots show a demo meeting played by the plugin's built-in mock meeting (th
 - **Live transcript.** GigaAM v3 transcribes the audio during the meeting. The final transcript is usually ready 1–3 minutes after the bot leaves.
 - **Speakers by name.** The bot uses Zoom's own active-speaker state, the highlighted video tile and per-participant WebRTC audio tracks. Voice embeddings (TitaNet) fill the gaps. You can rename any speaker.
 - **Live view and remote control.** Watch the bot's browser from the page, and click or type into it to solve a captcha or an unexpected dialog.
-- **Zoom account sign-in.** Sign the bot in to a Zoom account for meetings that refuse guests or walled bots.
-- **Google Calendar auto-join (OAuth).** Connect your Google account on the Meetings page with your own OAuth client, and pick the calendars to watch. The bot then joins every event that has a Zoom link, a minute before it starts, and leaves when the call ends. Any other calendar works through its secret iCal (ICS) address.
+- **Browser account sign-in.** Connect separate Zoom, Google and Yandex profiles for meetings that require authentication. Each call uses its own profile copy.
+- **Google Calendar auto-join (OAuth).** Connect your Google account on the Meetings page with your own OAuth client, and pick the calendars to watch. The bot then joins every event that has a supported meeting link, a minute before it starts, and leaves when the call ends. Any other calendar works through its secret iCal (ICS) address.
 - **Bot name and avatar.** Set the name participants see, and upload an avatar. The bot turns on its camera and shows the avatar in a circle with its name, instead of a blank tile.
 - **Search, summaries, downloads.** Full-text search across all meetings, agent-written Markdown summaries, and downloads as md, txt, srt, vtt, json or the Opus audio.
+- **Templates and analysis.** Five built-in templates, editable custom rules, decisions, tasks with completion state, risks, chapters, follow-up drafts and speech metrics. Every analysis keeps the exact rules used.
+- **Meeting Q&A.** Ask about one or multiple recordings; API answers cite actual transcript segments and timecodes. Agent mode returns instructions to the connected BB agent instead of pretending it has generated an answer.
+- **MCP, REST and webhooks.** Authenticated external-agent endpoints, rotatable personal tokens and HMAC-signed completion events with the final transcript. See [Notetaker integrations](docs/notetaker.ru.md).
 - **Import.** `bb meetings import <file>` transcribes an existing audio or video recording.
+
+Full settings, templates, browser accounts and external-agent connection details are under **Настройки** on the Meetings page. [New functions and setup](docs/notetaker.ru.md).
 
 ## Google Calendar setup
 
@@ -60,7 +65,7 @@ Step-by-step instructions in Russian: [docs/guide.ru.md §8.1](docs/guide.ru.md)
 | Disk | About 15 MB per hour of Opus audio, plus about 115 MB per hour of temporary PCM while a meeting is transcribed |
 | RAM | About 0.5–1 GB per bot (Chrome) and about 250 MB per transcriber |
 
-Transcription is Russian only, and the bot supports Zoom only: meetings, webinars through a participant link, and Zoom Events. Google Meet and Microsoft Teams are not supported.
+Transcription is Russian only. Supported meeting platforms are Zoom, Google Meet, Yandex Telemost and Jitsi. For a self-hosted Jitsi URL pass `--platform jitsi`. Admission still depends on the service and meeting organizer.
 
 ## Install
 
@@ -68,10 +73,16 @@ Meetings needs the [GigaAM plugin](https://github.com/AiXenix/bb-plugin-gigaam) 
 
 ```sh
 bb plugin install git:https://github.com/AiXenix/bb-plugin-gigaam@^0.1.0     # GigaAM v3 (wait for: bb gigaam status → ready)
-bb plugin install git:https://github.com/AiXenix/bb-plugin-meetings@^0.1.0
+bb plugin install 'git:https://github.com/AiXenix/bb-plugin-meetings@^0.3.0'
 ```
 
 Or install a local checkout with `bb plugin install /path/to/bb-plugin-meetings`.
+
+The plugin uses BB-managed settings, storage and host paths. It does not require
+a particular server address or external bot. The optional adapters in
+`integrations/` connect existing agents; the MCP stdio adapter needs only Node.js
+and a BB CLI that already has access to your BB. The recorder runs on a supported
+Linux host, while BB's browser interface can be used from any client.
 
 Then check the recording machine and install what is missing:
 
@@ -220,7 +231,7 @@ Edit them on the Meetings plugin's settings page in bb, or with `bb plugin confi
 
 - **Audio stays local.** Recording, speech recognition (the `gigaam` plugin on `127.0.0.1`, unless you point `gigaamUrl` at another machine), speaker detection and storage all run on your machine. The bot talks only to Zoom.
 - **Agents send transcripts to their model provider.** Results of the meetings tools go to the AI model provider of the agent thread, like any other tool result: transcript text from `meetings_transcript`, search hits from `meetings_search`, participant names from `meetings_status`. Summaries are written by that model. This happens **automatically** after every meeting started from an agent thread: by default the plugin posts a message to the thread and asks the agent to read the whole transcript and summarize it.
-- **Keeping everything local.** Start meetings from the Встречи page or a terminal, which notifies no thread. For agent-started meetings, run `bb plugin config meetings set notifyThread false` (or `bb meetings join --no-notify`), or empty `autoSummaryPrompt` so the thread gets only a short notice. Calendar auto-join notifies no thread.
+- **Keeping everything local.** Disable automatic analysis (`autoSummarize`) and configured webhooks. Start meetings from the Встречи page or a terminal, which notifies no thread. For agent-started meetings, run `bb plugin config meetings set notifyThread false` (or `bb meetings join --no-notify`), or empty `autoSummaryPrompt` so the thread gets only a short notice. Calendar auto-join notifies no thread.
 - **Consent.** The bot is visible to every participant. Tell participants they are being recorded; in many countries the law requires their consent. Set `chatAnnouncement` to post a notice in the meeting chat.
 - **Deleting.** `bb meetings delete <id> --yes` removes the recording, the transcript and the summary. A Zoom sign-in profile stays in `host-data/profiles/zoom` until `bb meetings zoom-logout`.
 

@@ -58,6 +58,10 @@ export interface MappedStatus {
 }
 
 const ERROR_TEXT: Readonly<Record<BotErrorCode, { ru: string; en: string }>> = {
+  join_rejected: {
+    ru: "Подключение отклонено сервисом или организатором. Проверьте аккаунт бота и допуск к встрече.",
+    en: "The service or organizer rejected the join. Check the bot account and meeting admission.",
+  },
   invalid_meeting: {
     ru: "Встреча не найдена: неверный номер или ссылка больше не действует",
     en: "The meeting was not found: wrong meeting id or the link is no longer valid",
@@ -67,8 +71,8 @@ const ERROR_TEXT: Readonly<Record<BotErrorCode, { ru: string; en: string }>> = {
     en: "Wrong passcode. Use the invite link with ?pwd=… or the right passcode",
   },
   auth_required: {
-    ru: "Организатор пускает только вошедших в Zoom. Войдите в Zoom-аккаунт бота (bb meetings zoom-login) и включите «Входить под Zoom-аккаунтом»",
-    en: "The host only admits signed-in Zoom users. Sign the bot in (bb meetings zoom-login) and enable the useZoomAccount setting",
+    ru: "Организатор пускает только вошедших в аккаунт. Подключите аккаунт нужной платформы на странице «Встречи».",
+    en: "The organizer only admits signed-in users. Connect the platform account on the Meetings page.",
   },
   registration_required: {
     ru: "Встреча требует регистрации: зарегистрируйтесь и дайте боту персональную ссылку участника",

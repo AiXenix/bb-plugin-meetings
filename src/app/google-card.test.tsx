@@ -232,7 +232,7 @@ describe("google calendar card", () => {
     await within(section).findByText(/anna@example\.com/, {}, { timeout: 4000 });
     expect(callsTo(slot, "google.status").length).toBeGreaterThan(pollsBefore);
     expect(within(section).queryByText("Ждём подтверждения в Google…")).toBeNull();
-    expect(within(section).getByText(/2\s+Zoom-встречи в ближайшие сутки/)).toBeTruthy();
+    expect(within(section).getByText(/2\s+встречи в ближайшие сутки/)).toBeTruthy();
     expect(within(section).getByText("основной")).toBeTruthy();
 
     // Auto-join (shared with ICS) is a toggle on the card.
@@ -268,7 +268,7 @@ describe("google calendar card", () => {
 
     // Sync.
     fireEvent.click(within(section).getByRole("button", { name: "Синхронизировать" }));
-    await within(section).findByText(/3\s+Zoom-встречи в ближайшие сутки/);
+    await within(section).findByText(/3\s+встречи в ближайшие сутки/);
     expect(callsTo(slot, "google.sync")).toEqual([null]);
 
     // Disconnect through the confirmation.
@@ -408,7 +408,7 @@ describe("google calendar card", () => {
     await answer(base, CONNECTED);
     await within(section).findByText(/anna@example\.com/);
     await answer(base + 1, { ...CONNECTED, upcomingCount: 5 });
-    await within(section).findByText(/5\s+Zoom-встреч в ближайшие сутки/);
+    await within(section).findByText(/5\s+встреч в ближайшие сутки/);
 
     // An older answer arriving after a newer one is dropped.
     await slot.behavior.emitRealtime("meetings.google", {});
@@ -416,9 +416,9 @@ describe("google calendar card", () => {
     await slot.behavior.emitRealtime("meetings.google", {});
     await waitFor(() => expect(calls).toHaveLength(base + 4));
     await answer(base + 3, { ...CONNECTED, upcomingCount: 7 });
-    await within(section).findByText(/7\s+Zoom-встреч в ближайшие сутки/);
+    await within(section).findByText(/7\s+встреч в ближайшие сутки/);
     await answer(base + 2, { ...CONNECTED, upcomingCount: 1 });
-    expect(within(section).getByText(/7\s+Zoom-встреч в ближайшие сутки/)).toBeTruthy();
+    expect(within(section).getByText(/7\s+встреч в ближайшие сутки/)).toBeTruthy();
     slot.lifecycle.unmount();
   });
 

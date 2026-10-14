@@ -654,7 +654,7 @@ export function applyAutoJoin(
             : !options.autoJoin
               ? "Автоподключение к встречам из календаря выключено"
               : row.url === null
-                ? "У события больше нет ссылки Zoom"
+                ? "У события больше нет поддерживаемой ссылки на встречу"
                 : "Не подходит под фильтр календаря";
       options.cancelMeeting(meeting, reason);
       return { cancelled: meeting.id };

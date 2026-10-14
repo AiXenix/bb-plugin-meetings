@@ -310,7 +310,7 @@ function GoogleSetup({
         <div className="min-w-0 flex-1 space-y-1">
           <p className="font-medium text-foreground">Google Календарь не подключён</p>
           <p className="text-muted-foreground">
-            Бот сам заходит на Zoom-встречи из вашего календаря. Нужен свой OAuth-клиент Google — это бесплатно и
+            Бот сам заходит на встречи Zoom, Google Meet, Телемост и Jitsi из вашего календаря. Нужен свой OAuth-клиент Google — это бесплатно и
             занимает несколько минут.
           </p>
         </div>
@@ -699,7 +699,7 @@ function AutoJoinInfo({ calendar, onChanged }: { calendar: CalendarStatus | null
       </div>
       <p className="text-muted-foreground">
         {calendar.autoJoin
-          ? `Бот сам заходит во встречи со ссылкой Zoom${leadText !== null ? ` (${leadText})` : ""} и выходит, когда созвон закончился.`
+          ? `Бот сам заходит во встречи с поддерживаемой ссылкой${leadText !== null ? ` (${leadText})` : ""} и выходит, когда созвон закончился.`
           : "Встречи из календаря видны в «Запланированных», но бот к ним сам не подключается."}{" "}
         Настройка общая для Google и ICS-календарей.
       </p>
@@ -746,8 +746,8 @@ function GoogleConnected({
               : `Синхронизирован ${formatDateTime(status.lastSyncAt)}`}
             {" · "}
             {count === 0
-              ? "Zoom-встреч в ближайшие сутки нет"
-              : `${count} ${pluralRu(count, "Zoom-встреча", "Zoom-встречи", "Zoom-встреч")} в ближайшие сутки`}
+              ? "Встреч в ближайшие сутки нет"
+              : `${count} ${pluralRu(count, "встреча", "встречи", "встреч")} в ближайшие сутки`}
           </p>
         </div>
       </div>

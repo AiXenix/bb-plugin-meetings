@@ -3,6 +3,8 @@ import {
   MeetingUrlError,
   extractMeetingUrls,
   maskMeetingUrl,
+  meetingIdentity,
+  normalizeMeetingUrl,
   parseMeetingUrl,
   zoomWebClientUrl,
 } from "../src/shared/meeting-url.js";
@@ -87,7 +89,7 @@ describe("parseMeetingUrl", () => {
       "",
       "   ",
       "12345",
-      "https://meet.google.com/abc-defg-hij",
+      "https://example.com/abc-defg-hij",
       "https://zoom.us/webinar/register/WN_abc",
       "ftp://zoom.us/j/123456789",
       "https://zoom.us/j/12ab",
@@ -97,11 +99,46 @@ describe("parseMeetingUrl", () => {
     for (const input of bad) {
       expect(() => parseMeetingUrl(input), input).toThrow(MeetingUrlError);
     }
-    expect(() => parseMeetingUrl("https://meet.google.com/abc")).toThrow(/Поддерживаются только ссылки Zoom/);
+    expect(() => parseMeetingUrl("https://meet.google.com/abc")).toThrow(/кодом встречи/);
   });
 
   it("builds web-client URLs", () => {
     expect(zoomWebClientUrl("123456789", { passcode: "a b" })).toBe("https://app.zoom.us/wc/123456789/join?pwd=a+b");
+  });
+
+  it("accepts Meet meeting codes and lookup links without accepting creation or account pages", () => {
+    expect(parseMeetingUrl("meet.google.com/abc-defg-hij?authuser=1")).toMatchObject({ platform: "meet", kind: "meeting", joinUrl: "https://meet.google.com/abc-defg-hij?authuser=1" });
+    expect(parseMeetingUrl("https://meet.google.com/lookup/team_daily/").joinUrl).toBe("https://meet.google.com/lookup/team_daily");
+    for (const path of ["new", "landing", "abc", "abc-defg-hij/unknown"]) expect(() => parseMeetingUrl(`https://meet.google.com/${path}`)).toThrow(MeetingUrlError);
+  });
+
+  it("accepts Telemost 360 and regional invitations with one room identity", () => {
+    for (const domain of ["ru", "com", "com.tr", "kz", "by", "uz"]) {
+      for (const prefix of ["telemost", "telemost.360"]) {
+        const link = `https://${prefix}.yandex.${domain}/j/92601325133282?utm_source=calendar`;
+        expect(parseMeetingUrl(link).platform).toBe("telemost");
+        expect(meetingIdentity(link)).toBe("telemost:92601325133282");
+      }
+    }
+    expect(parseMeetingUrl("https://telemost.yandex.ru/private-join/92601325133282/").joinUrl).toBe("https://telemost.yandex.ru/j/92601325133282");
+    expect(() => parseMeetingUrl("https://telemost.yandex.ru/")).toThrow(MeetingUrlError);
+    expect(() => parseMeetingUrl("https://telemost.yandex.ru.evil.test/j/92601325133282")).toThrow(MeetingUrlError);
+  });
+
+  it("supports Jitsi rooms and an explicitly identified self-hosted installation", () => {
+    expect(parseMeetingUrl("https://meet.jit.si/TeamRoom/").platform).toBe("jitsi");
+    expect(parseMeetingUrl("https://jitsi.company.test/TeamRoom").platform).toBe("jitsi");
+    expect(parseMeetingUrl("https://video.company.test/TeamRoom", { platform: "jitsi" }).platform).toBe("jitsi");
+    expect(() => parseMeetingUrl("https://meet.jit.si/")).toThrow(MeetingUrlError);
+  });
+
+  it("normalizes identities without confusing providers, clouds or Jitsi hosts", () => {
+    expect(meetingIdentity("https://zoom.us/j/81234567890?pwd=one")).toBe(meetingIdentity("https://company.zoom.com/wc/81234567890/join?pwd=two"));
+    expect(meetingIdentity("https://zoomgov.com/j/81234567890")).not.toBe(meetingIdentity("https://zoom.us/j/81234567890"));
+    expect(meetingIdentity("https://meet.google.com/abc-defg-hij/?utm_source=calendar")).toBe(meetingIdentity("https://meet.google.com/abc-defg-hij?authuser=2"));
+    expect(meetingIdentity("https://meet.jit.si/TeamRoom/")).toBe(meetingIdentity("https://meet.jit.si/teamroom"));
+    expect(meetingIdentity("https://jitsi.company.test/teamroom")).not.toBe(meetingIdentity("https://meet.jit.si/teamroom"));
+    expect(normalizeMeetingUrl("https://zoom.us/j/81234567890?pwd=abc&utm_source=mail#fragment")).toBe("https://app.zoom.us/wc/81234567890/join?pwd=abc");
   });
 });
 
@@ -124,6 +161,13 @@ describe("extractMeetingUrls", () => {
   it("returns nothing for text without Zoom links", () => {
     expect(extractMeetingUrls("Обсуждение бюджета в переговорной 3")).toEqual([]);
   });
+
+  it("extracts every supported platform from calendar descriptions and deduplicates entry variants", () => {
+    const links = ["https://meet.google.com/abc-defg-hij", "https://telemost.360.yandex.com.tr/j/92601325133282", "https://meet.jit.si/TeamRoom", "https://events.zoom.us/ev/example"];
+    const text = links.map(link => `<a href="${link}">${link}</a>`).join("\n")
+      + "\nRegional duplicate: https://telemost.yandex.ru/j/92601325133282?utm_source=mail.\n";
+    expect(extractMeetingUrls(text)).toEqual(links);
+  });
 });
 
 describe("maskMeetingUrl", () => {
@@ -133,5 +177,6 @@ describe("maskMeetingUrl", () => {
     );
     expect(maskMeetingUrl("https://zoom.us/w/1?tk=abc&password=p")).toBe("https://zoom.us/w/1?tk=***&password=***");
     expect(maskMeetingUrl("https://zoom.us/j/1234567890")).toBe("https://zoom.us/j/1234567890");
+    expect(maskMeetingUrl("https://meet.jit.si/team?jwt=fixture-token#password=fixture-password")).toBe("https://meet.jit.si/team?jwt=***#password=***");
   });
 });

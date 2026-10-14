@@ -16,6 +16,7 @@ import { registerRpc } from "./src/server/rpc.js";
 import { MeetingsService, type ServiceOptions } from "./src/server/service.js";
 import { defineSettings } from "./src/server/settings.js";
 import { registerTools } from "./src/server/tools.js";
+import { registerAgentTransports } from "./src/server/mcp.js";
 
 export type { RpcContract } from "./src/shared/rpc-contract.js";
 
@@ -35,6 +36,7 @@ export function createMeetingsPlugin(options: PluginOptions = {}) {
 
     registerRpc(bb, service);
     registerHttp(bb, service);
+    registerAgentTransports(bb, service, service.notetaker.tokens);
     registerCli(bb, service);
     registerTools(bb, service);
 
@@ -57,6 +59,19 @@ export function createMeetingsPlugin(options: PluginOptions = {}) {
     // Starts due meetings, follows running ones (2 s while active, 15 s idle),
     // reconciles everything once on load and syncs calendars.
     bb.background.service("scheduler", { start: (signal) => service.runScheduler(signal) });
+    bb.background.service("completion-recovery", {
+      start: async (signal) => {
+        while (!signal.aborted) {
+          await service.notetaker.resumeDeliveries();
+          await new Promise<void>((resolve) => {
+            const done = () => { clearTimeout(timer); signal.removeEventListener("abort", done); resolve(); };
+            const timer = setTimeout(done, 60_000);
+            signal.addEventListener("abort", done, { once: true });
+            if (signal.aborted) done();
+          });
+        }
+      },
+    });
   };
 }
 

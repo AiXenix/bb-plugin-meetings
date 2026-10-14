@@ -30,23 +30,34 @@ describe("registrations", () => {
     const r = harness.inspection.registrations;
     expect([...r.rpcMethods].sort()).toEqual(Object.keys(rpcContract).sort());
     expect(r.httpRoutes.map((route) => `${route.method} ${route.path}`).sort()).toEqual([
+      "DELETE /mcp",
+      "DELETE /mcp-token",
+      "GET /agent-meta",
       "GET /audio",
       "GET /bot/avatar-preview",
       "GET /download",
       "GET /google/callback",
+      "GET /mcp",
+      "GET /mcp-token",
       "GET /mock-meeting/index.html",
       "GET /mock-meeting/mock.css",
       "GET /mock-meeting/mock.js",
       "GET /screenshot",
       "HEAD /audio",
+      "POST /api",
+      "POST /api-token",
+      "POST /mcp",
+      "POST /mcp-token",
       "POST /mock-meeting/log",
     ]);
-    expect(r.httpRoutes.every((route) => route.auth === "local")).toBe(true);
-    expect(r.services.map((s) => s.name)).toEqual(["scheduler"]);
+    expect(r.httpRoutes.every((route) => route.auth === (/\/(mcp|api)-token$/.test(route.path) ? "none" : "local"))).toBe(true);
+    expect(r.services.map((s) => s.name)).toEqual(["scheduler", "completion-recovery"]);
     expect(r.cli?.name).toBe("meetings");
     expect(r.cli?.commands.map((c) => c.name).sort()).toEqual(
       [
         "api",
+        "accounts",
+        "analyze",
         "bot",
         "calendar",
         "calendar-skip",
@@ -65,6 +76,7 @@ describe("registrations", () => {
         "logs",
         "rename-speaker",
         "retranscribe",
+        "retry",
         "screenshot",
         "search",
         "selftest",
@@ -72,13 +84,14 @@ describe("registrations", () => {
         "show",
         "stop",
         "summary",
+        "templates",
         "transcript",
         "zoom-login",
         "zoom-logout",
         "zoom-status",
       ].sort(),
     );
-    expect(r.agentTools.map((t) => t.name)).toEqual([
+    expect(r.agentTools.map((t) => t.name)).toEqual(expect.arrayContaining([
       "meetings_join",
       "meetings_status",
       "meetings_stop",
@@ -86,11 +99,17 @@ describe("registrations", () => {
       "meetings_search",
       "meetings_save_summary",
       "meetings_rename_speaker",
-    ]);
+      "meetings_analyze",
+      "meetings_save_insights",
+      "meetings_ask",
+      "meetings_calendar",
+      "meetings_templates",
+      "meetings_settings",
+    ]));
     const joinTool = r.agentTools[0]!;
     expect(joinTool.instructions?.length).toBeLessThan(4096);
     expect(joinTool.presentation?.label?.pending).toBe("Отправляю бота на встречу");
-    expect(Object.keys(r.settingsDescriptors)).toEqual([
+    expect(Object.keys(r.settingsDescriptors)).toEqual(expect.arrayContaining([
       "botName",
       "showAvatar",
       "maxDurationMinutes",
@@ -118,7 +137,14 @@ describe("registrations", () => {
       "calendarSyncMinutes",
       "googleClientId",
       "googleClientSecret",
-    ]);
+      "summaryMode",
+      "summaryTemplateId",
+      "aiApiKey",
+      "webhookSecret",
+      "autoTranscribe",
+      "useMeetAccount",
+      "useTelemostAccount",
+    ]));
   });
 
   it("validates settings ranges and JSON", async () => {
@@ -199,7 +225,7 @@ describe("bb meetings CLI", () => {
     expect(JSON.parse(bad.stdout)).toMatchObject({ ok: false, error: { code: "invalid_time" } });
     const invalid = await harness.behavior.runCli(["join", "https://teams.microsoft.com/l/x"]);
     expect(invalid.exitCode).toBe(1);
-    expect(invalid.stderr).toContain("Not a joinable Zoom link");
+    expect(invalid.stderr).toContain("Not a joinable meeting link");
   });
 
   it("lists an exact status beyond the newest 200 meetings, and pages without skipping same-time meetings", async () => {

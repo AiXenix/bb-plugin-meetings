@@ -337,6 +337,7 @@
       disclaimer: !!firstVisible(["#wc_agree1", "#disclaimer_agree"]),
       allow: !!allowButton,
       joinFromBrowser: buttonsMatching(/^join from (your |a )?browser$/i).length > 0,
+      testJoin: !!firstVisible(["#btnJoinTest"]),
       prejoin: prejoinPresent
         ? {
             name: !!nameInput,

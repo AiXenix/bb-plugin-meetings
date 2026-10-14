@@ -26,6 +26,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.request
 
 import numpy as np
@@ -450,6 +451,25 @@ class AsrClientTests(unittest.TestCase):
         post = c._post
         c._post = lambda url, body, ctype: (posts.append(url), post(url, body, ctype))[1]
         return c, stop, posts
+
+    def test_endpoint_fallback_and_cache_are_per_server(self):
+        import io
+        requests = []
+
+        class Opener:
+            def open(_, request, timeout):
+                requests.append(request.full_url)
+                if request.full_url == "http://first.test/transcribe":
+                    raise urllib.error.HTTPError(request.full_url, 404, "Not found", {}, io.BytesIO(b"missing"))
+                return io.BytesIO(b'{"text":"  recognized   speech  "}')
+
+        c, _, _ = self.client("http://first.test")
+        c._opener = Opener()
+        for url in ["http://first.test", "http://first.test", "http://second.test", "http://first.test"]:
+            self.assertEqual(c._post(url, b"audio", "audio/wav"), "recognized speech")
+        self.assertEqual(requests, ["http://first.test/transcribe", "http://first.test/v1/audio/transcriptions",
+                                   "http://first.test/v1/audio/transcriptions", "http://second.test/transcribe",
+                                   "http://first.test/v1/audio/transcriptions"])
 
     def transcribe(self, c, stop, seconds, after=None):
         """Run c.transcribe on a second of noise; `after()` runs mid-way. Returns
@@ -918,7 +938,7 @@ class TranscriberTests(unittest.TestCase):
         self.assertIn("switching to", self.log_text(d))
 
         # 503 twice (retried, nothing lost), then one 400 (that piece is skipped).
-        calls = {"n": 0}
+        calls = {"n": 0, "forwarded": []}
 
         class Proxy(http.server.BaseHTTPRequestHandler):
             def log_message(self, *a):
@@ -931,11 +951,22 @@ class TranscriberTests(unittest.TestCase):
                     return self._send(503, b'{"detail": "not ready"}')
                 if calls["n"] == 4:  # calls 1-3: the first piece; 4: the second
                     return self._send(400, b'{"detail": "bad audio"}')
-                req = urllib.request.Request(GIGAAM + self.path, data=body, method="POST",
+                # This fixture tests retryable/piece-specific HTTP failures,
+                # independently of the live server's legacy route support.
+                # Current managed GigaAM exposes only the canonical endpoint.
+                upstream_path = "/v1/audio/transcriptions" if self.path == "/transcribe" else self.path
+                calls["forwarded"].append(upstream_path)
+                req = urllib.request.Request(GIGAAM + upstream_path, data=body, method="POST",
                                              headers={"Content-Type": self.headers["Content-Type"]})
                 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-                with opener.open(req, timeout=60) as r:
-                    self._send(r.status, r.read())
+                try:
+                    with opener.open(req, timeout=60) as r:
+                        self._send(r.status, r.read())
+                except urllib.error.HTTPError as error:
+                    # Forward status/body instead of terminating the socket:
+                    # an EOF would test network retries, hiding the HTTP error.
+                    with error:
+                        self._send(error.code, error.read())
 
             def do_GET(self):
                 self._send(200, b'{"ready": true, "model": "stub"}')
@@ -964,6 +995,7 @@ class TranscriberTests(unittest.TestCase):
         self.assertFalse(any("Здравствуйте" in x for x in texts), "the 400'd piece is skipped")
         self.assertIn("HTTP 400", self.log_text(d))
         self.assertEqual(len(texts), 11)
+        self.assertEqual(set(calls["forwarded"]), {"/v1/audio/transcriptions"})
 
     # ---- 7-8: degraded modes
 

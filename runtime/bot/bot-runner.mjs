@@ -8,6 +8,8 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { ACCOUNT_LABELS, LOGIN_URLS, profileFor, sessionReady } from "./lib/account-session.mjs";
 import { PcmTail, Recorder, ensurePulse, gcStalePulseModules, loadPulseModules, startXvfb, stopXvfb, unloadPulseModules } from "./lib/av.mjs";
 import { SCREEN, killChromeForProfile, killChromeForProfileSync, launchChrome, prepareProfile, resolveChromePath } from "./lib/chrome.mjs";
 import { ControlChannel } from "./lib/control.mjs";
@@ -16,6 +18,9 @@ import { appendJsonl, ensureDir, readJson, stamp, writeFileAtomic, writeJsonAtom
 import { AloneDetector, SilenceDetector, SpeakerFusion, cleanNames, sameSet } from "./lib/fusion.mjs";
 import { BotError, StopRequested, findProcesses, killPid, sleep, sleepUnless, within } from "./lib/proc.mjs";
 import mockPlatform from "./platform-mock.mjs";
+import telemostPlatform, { telemostFrame, TELEMOST_OP } from "./platform-telemost.mjs";
+import meetPlatform, { MEET_OP } from "./platform-meet.mjs";
+import jitsiPlatform, { JITSI_OP } from "./platform-jitsi.mjs";
 import zoomPlatform, { pageOp, resolveSelectors, zoomFrame } from "./platform-zoom.mjs";
 
 const HEARTBEAT_MS = 2_000;
@@ -33,8 +38,7 @@ const MAX_DEBUG_DUMPS = 40;
 /** RMS of the recording above which "there is audio" for the no-speaker forensics. */
 const AUDIBLE_RMS = 0.003;
 const MEETING_ID = /^mtg_[a-z0-9]{6,32}$/;
-const PLATFORMS = { zoom: zoomPlatform, mock: mockPlatform };
-const SIGNED_IN_COOKIES = new Set(["zm_aid", "_zm_ssid", "zm_haid"]);
+export const PLATFORMS = { zoom: zoomPlatform, meet: meetPlatform, telemost: telemostPlatform, jitsi: jitsiPlatform, mock: mockPlatform };
 
 function parseArgs(argv) {
   const index = argv.indexOf("--meeting-dir");
@@ -47,7 +51,7 @@ function parseArgs(argv) {
 }
 
 /** Loose runtime check of config.json against botConfigSchema (src/shared/runtime-files.ts). */
-function validateConfig(config) {
+export function validateConfig(config) {
   const problems = [];
   const need = (ok, what) => {
     if (!ok) problems.push(what);
@@ -65,15 +69,18 @@ function validateConfig(config) {
   }
   need(config.silenceTimeoutSec === undefined || Number.isFinite(config.silenceTimeoutSec), "silenceTimeoutSec");
   need(config.avatarVideo === undefined || config.avatarVideo === null || typeof config.avatarVideo === "string", "avatarVideo");
+  need(config.browserProfileDir === undefined || config.browserProfileDir === null || typeof config.browserProfileDir === "string", "browserProfileDir");
+  need(config.autoTranscribe === undefined || typeof config.autoTranscribe === "boolean", "autoTranscribe");
   return problems;
 }
 
-class BotRunner {
+export class BotRunner {
   constructor(dir) {
     this.dir = dir;
     this.config = null;
     this.stopController = new AbortController();
     this.stopReason = null;
+    this.stopRequestedAt = null;
     this.fatal = null;
     this.outcome = null;
     this.closing = false;
@@ -164,6 +171,7 @@ class BotRunner {
   requestStop(reason) {
     if (this.stopReason !== null) return;
     this.stopReason = reason;
+    this.stopRequestedAt = Date.now();
     this.log("info", `Stop requested (${reason})`);
     this.stopController.abort();
   }
@@ -231,7 +239,8 @@ class BotRunner {
     if (!force && this.debugDumps >= MAX_DEBUG_DUMPS) return;
     this.debugDumps += 1;
     const base = path.join(ensureDir(this.file("debug")), `${stamp()}-${tag}`);
-    const frame = zoomFrame(page);
+    const frame = this.config.platform === "telemost" ? telemostFrame(page)
+      : this.config.platform === "zoom" || this.config.platform === "mock" ? zoomFrame(page) : page.mainFrame();
     const shot = await within(page.screenshot({ type: "jpeg", quality: 70, scale: "css", timeout: 5_000 }), 6_000, null);
     if (shot) await writeFileAtomic(`${base}.jpg`, shot).catch(() => {});
     const html = await within(page.content(), 5_000, null);
@@ -240,7 +249,9 @@ class BotRunner {
       const frameHtml = await within(frame.content(), 5_000, null);
       if (frameHtml) await writeFileAtomic(`${base}.frame.html`, frameHtml).catch(() => {});
     }
-    const forensics = await within(pageOp(frame, { op: "forensics", sel: this.selectors ?? {} }, 8_000), 9_000, null);
+    const source = this.config.platform === "telemost" ? TELEMOST_OP : this.config.platform === "meet" ? MEET_OP : this.config.platform === "jitsi" ? JITSI_OP : null;
+    const forensics = await within(source ? frame.evaluate(`${source}(${JSON.stringify({ op: "probe", botName: this.config.botName })})`)
+      : pageOp(frame, { op: "forensics", sel: this.selectors ?? {} }, 8_000), 9_000, null);
     const report = {
       tag,
       t: Date.now(),
@@ -294,7 +305,8 @@ class BotRunner {
     this.xvfb.process.on("exit", (code, signal) => {
       if (!this.closing) this.setFatal(new BotError("browser_crashed", `Xvfb exited (${signal ?? code})`));
     });
-    prepareProfile(profileDir, { copyFrom, log: this.log });
+    const accountName = this.config.browserProfileDir ? ACCOUNT_LABELS[this.config.platform] || "account" : "Zoom";
+    prepareProfile(profileDir, { copyFrom, accountName, log: this.log });
     this.profileDir = profileDir;
     const chromePath = resolveChromePath(this.config.chromePath);
     const read = (name) => fs.readFileSync(new URL(`./page/${name}`, import.meta.url), "utf8");
@@ -344,7 +356,8 @@ class BotRunner {
     const config = this.config;
     const adapter = PLATFORMS[config.platform];
     const short = config.meetingId.slice(4, 16);
-    this.selectors = resolveSelectors(config.speakerSelectors);
+    this.selectors = config.platform === "zoom" || config.platform === "mock" ? resolveSelectors(config.speakerSelectors)
+      : { lagMs: { track: 100, store: 700, tile: 700, ...config.speakerSelectors?.lagMs }, fusion: { ...config.speakerSelectors?.fusion } };
     this.setPhase("starting", "Preparing audio devices and a virtual display");
     await ensurePulse(this.log);
     await gcStalePulseModules(short, this.log);
@@ -354,7 +367,7 @@ class BotRunner {
     await this.startBrowser({
       pulse: this.pulse,
       profileDir: this.file("chrome-profile"),
-      copyFrom: config.zoomProfileDir ?? null,
+      copyFrom: profileFor(config),
       mediaArgs: fakeMediaArgs(this.camera),
     });
     if (this.stopController.signal.aborted) throw this.fatal ?? new StopRequested();
@@ -440,6 +453,22 @@ class BotRunner {
   }
 
   async sampleLoop(adapter, ctx) {
+    try {
+      return await this.sampleUntilStopped(adapter, ctx);
+    } finally {
+      // Speaker observations end when sampling ends, before polite leave,
+      // browser shutdown and ffmpeg flushing. Teardown is not speaking time.
+      this.finishSpeakers();
+    }
+  }
+
+  finishSpeakers() {
+    const last = this.fusion?.finish(this.stopRequestedAt ?? Date.now());
+    if (last) appendJsonl(this.file("speakers.jsonl"), last);
+    this.state.activeSpeakers = [];
+  }
+
+  async sampleUntilStopped(adapter, ctx) {
     const config = this.config;
     const joinedAt = this.state.joinedAt;
     this.fusion = new SpeakerFusion({ botName: config.botName, lagMs: this.selectors.lagMs, ...this.selectors.fusion });
@@ -556,68 +585,67 @@ class BotRunner {
   // ---------------------------------------------------------------- login mode
 
   async runLogin() {
-    const profileDir = this.config.zoomProfileDir;
-    if (!profileDir) throw new BotError("unknown", "Login mode needs zoomProfileDir in config.json");
+    const profileDir = profileFor(this.config);
+    const label = ACCOUNT_LABELS[this.config.platform] || this.config.platform;
+    const loginUrl = LOGIN_URLS[this.config.platform];
+    if (!profileDir || !loginUrl) throw new BotError("unknown", "Login mode needs a supported platform and its account profile");
     this.profileIsTemporary = false;
     this.selectors = resolveSelectors(null);
-    this.setPhase("starting", "Starting Chrome for the Zoom sign-in");
+    this.setPhase("starting", `Starting Chrome for the ${label} sign-in`);
     fs.mkdirSync(profileDir, { recursive: true });
     if (findProcesses(`--user-data-dir=${profileDir}`).length > 0) {
-      throw new BotError("unknown", "Another browser is already using the Zoom profile (a login session is running?)");
+      throw new BotError("unknown", "Another browser is already using the account profile (a login session is running?)");
     }
     for (const lock of ["SingletonLock", "SingletonSocket", "SingletonCookie"]) fs.rmSync(path.join(profileDir, lock), { force: true });
     await this.startBrowser({ pulse: null, profileDir, copyFrom: null });
-    await this.page.goto("https://zoom.us/signin", { waitUntil: "domcontentloaded", timeout: 60_000 }).catch((error) => {
+    await this.page.goto(loginUrl, { waitUntil: "domcontentloaded", timeout: 60_000 }).catch((error) => {
       this.log("warn", "The sign-in page did not finish loading", { error: error.message.split("\n")[0] });
     });
     // Zoom's cookie banner covers the form; decline it for the user.
-    await within(
+    if (this.config.platform === "zoom") await within(
       this.page.locator("#onetrust-reject-all-handler").click({ timeout: 8_000 }).then(() => this.log("info", "Declined the cookie banner")),
       9_000,
     );
-    this.setPhase("joining", 'Sign in to Zoom in the live view, then press "Done"');
+    this.setPhase("joining", `Sign in to ${label} in the live view, then press "Done"`);
     const deadline = Date.now() + LOGIN_TIMEOUT_MS;
     let signedInAt = null;
     for (;;) {
       if (this.fatal) throw this.fatal;
       if (this.stopReason !== null || this.loginDone) break;
       const now = Date.now();
-      if (signedInAt === null && (await this.zoomSignedIn())) {
+      if (signedInAt === null && (await this.accountSignedIn())) {
         signedInAt = now;
-        this.log("info", "Zoom sign-in detected");
-        this.setPhase("joining", "Signed in to Zoom; saving the session");
+        this.log("info", `${label} sign-in detected`);
+        this.setPhase("joining", `Signed in to ${label}; saving the session`);
       }
       if (signedInAt !== null && now - signedInAt >= LOGIN_FINISH_DELAY_MS) break;
       if (now >= deadline) {
         this.outcome = {
           phase: "failed",
           endReason: "waiting_timeout",
-          error: { code: "auth_required", message: "Nobody signed in to Zoom within 15 minutes" },
+          error: { code: "auth_required", message: `Nobody signed in to ${label} within 15 minutes` },
           detail: "Sign-in session timed out",
         };
         return;
       }
       await sleepUnless(1_000, this.stopController.signal);
     }
-    const signedIn = await this.zoomSignedIn();
+    const signedIn = await this.accountSignedIn();
     const why = this.loginDone ? "closed by the user" : this.stopReason !== null ? "stopped" : "finished";
     this.outcome = {
       phase: "ended",
       endReason: "stopped",
       error: null,
-      detail: signedIn ? `Signed in to Zoom; session ${why}` : `Login session ${why} without a Zoom sign-in`,
+      detail: signedIn ? `Signed in to ${label}; session ${why}` : `Login session ${why} without a ${label} sign-in`,
     };
     this.log("info", this.outcome.detail, { signedIn });
   }
 
-  /** Signed in = the page left /signin and a Zoom session cookie exists (DESIGN §6.6). */
-  async zoomSignedIn() {
+  /** Require the provider destination and a live session cookie, never just a closed form. */
+  async accountSignedIn() {
     try {
-      const url = new URL(this.page.url());
-      if (!/(^|\.)zoom\.(us|com)$/i.test(url.hostname)) return false;
-      if (/^\/(signin|signup|login|oauth|saml|google_oauth|apple_oauth|facebook_oauth|sso)/i.test(url.pathname)) return false;
-      const cookies = await this.context.cookies(["https://zoom.us", "https://app.zoom.us"]);
-      return cookies.some((cookie) => SIGNED_IN_COOKIES.has(cookie.name));
+      const cookies = await this.context.cookies();
+      return sessionReady(this.config.platform, this.page.url(), cookies);
     } catch {
       return false;
     }
@@ -697,8 +725,7 @@ class BotRunner {
     try {
       this.control?.stop();
       if (this.recorder) await this.recorder.stop();
-      const last = this.fusion?.finish(Date.now());
-      if (last) appendJsonl(this.file("speakers.jsonl"), last);
+      this.finishSpeakers();
       if (this.context) await within(this.context.close(), 8_000);
       if (this.profileDir) {
         const killed = await killChromeForProfile(this.profileDir);
@@ -745,12 +772,14 @@ class BotRunner {
 
 const TERMINAL = new Set(["ended", "failed"]);
 
-const { meetingDir } = parseArgs(process.argv.slice(2));
-const runner = new BotRunner(meetingDir);
-runner.run().then(
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const { meetingDir } = parseArgs(process.argv.slice(2));
+  const runner = new BotRunner(meetingDir);
+  runner.run().then(
   (code) => process.exit(code),
   (error) => {
     console.error(error);
     process.exit(1);
   },
-);
+  );
+}

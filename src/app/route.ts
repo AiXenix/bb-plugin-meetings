@@ -10,6 +10,7 @@ import { MEETING_ID_PATTERN, PANEL_PATH } from "./constants";
 export type Route =
   | { kind: "list" }
   | { kind: "zoom-login" }
+  | { kind: "account-login"; platform: "meet" | "telemost" }
   | { kind: "detail"; id: string; segmentId: number | null }
   | { kind: "unknown"; subPath: string };
 
@@ -29,6 +30,7 @@ export function parseRoute(subPath: string): Route {
   const [first, second, third] = parts;
   if (first === undefined) return { kind: "list" };
   if (first === "zoom-login" && parts.length === 1) return { kind: "zoom-login" };
+  if (first === "account-login" && (second === "meet" || second === "telemost") && parts.length === 2) return { kind: "account-login", platform: second };
   if (MEETING_ID_PATTERN.test(first)) {
     const segmentId =
       second === "t" && third !== undefined && /^\d{1,9}$/.test(third) ? Number.parseInt(third, 10) : null;
@@ -45,6 +47,7 @@ export interface MeetingsNav {
   toList(options?: { replace?: boolean }): void;
   toMeeting(id: string, segmentId?: number | null): void;
   toZoomLogin(): void;
+  toAccountLogin?(platform: "zoom" | "meet" | "telemost"): void;
 }
 
 export function useMeetingsNav(): MeetingsNav {
@@ -55,6 +58,7 @@ export function useMeetingsNav(): MeetingsNav {
       toMeeting: (id, segmentId = null) =>
         navigate.toPluginPanel(PANEL_PATH, { subPath: meetingSubPath(id, segmentId) }),
       toZoomLogin: () => navigate.toPluginPanel(PANEL_PATH, { subPath: "zoom-login" }),
+      toAccountLogin: platform => navigate.toPluginPanel(PANEL_PATH, { subPath: platform === "zoom" ? "zoom-login" : `account-login/${platform}` }),
     }),
     [navigate],
   );

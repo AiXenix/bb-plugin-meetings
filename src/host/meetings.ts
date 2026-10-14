@@ -394,10 +394,24 @@ export async function startMeeting(paths: HostPaths, input: BotConfig): Promise<
   const parsed = botConfigSchema.parse(input);
   const dir = meetingDir(paths, parsed.meetingId);
   await fs.mkdir(paths.meetings, { recursive: true });
+  const profileDir = parsed.browserProfileDir ?? parsed.zoomProfileDir;
+  const trustedProfile = path.join(paths.profiles, parsed.platform);
+  if (profileDir !== null && path.resolve(profileDir) !== path.resolve(trustedProfile)) {
+    throw new Error("Профиль браузера должен принадлежать этой платформе и этому модулю");
+  }
   if (parsed.mode === "login") {
-    const other = (await liveLoginSessions(paths)).filter((id) => id !== parsed.meetingId);
-    if (other.length > 0) throw new Error(`Уже идёт вход в Zoom (${other[0]}); завершите его сначала`);
-    if (parsed.zoomProfileDir !== null) await fs.mkdir(path.dirname(parsed.zoomProfileDir), { recursive: true });
+    const other: string[] = [];
+    for (const id of await liveLoginSessions(paths)) {
+      if (id === parsed.meetingId) continue;
+      const config = await readJson(file(meetingDir(paths, id), F.config)) as { platform?: string } | null;
+      if (config?.platform === parsed.platform) other.push(id);
+    }
+    const name = { zoom: "Zoom", meet: "Google Meet", telemost: "Телемост", jitsi: "Jitsi", mock: "mock" }[parsed.platform];
+    if (other.length > 0) throw new Error(`Уже идёт вход в ${name} (${other[0]}); завершите его сначала`);
+    if (profileDir !== null) {
+      await fs.mkdir(profileDir, { recursive: true, mode: 0o700 });
+      await fs.chmod(profileDir, 0o700);
+    }
   }
   await requireRuntime(paths, { bot: true });
   await prepareDir(paths, dir, parsed.meetingId);
@@ -416,7 +430,7 @@ export async function startMeeting(paths: HostPaths, input: BotConfig): Promise<
   await writeJsonAtomic(file(dir, F.pids), { bot: { pid, startedAt: Date.now() } });
   await createJsonExclusive(file(dir, F.state), initialState(config, pid));
 
-  if (config.mode === "meeting" && config.liveTranscription) {
+  if (config.mode === "meeting" && config.liveTranscription && config.autoTranscribe !== false) {
     try {
       const transcriberPid = await spawnTranscriber(paths, dir, config.transcriber, "live");
       await updatePids(file(dir, F.pids), {

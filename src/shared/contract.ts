@@ -258,6 +258,11 @@ export const hostContract = defineRpcContract({
       })
       .strict(),
   },
+  "browser.profile": {
+    experimental_description: "Inspect or delete an isolated Google Meet or Telemost browser profile on this recording host.",
+    input: z.object({ platform: z.enum(["meet", "telemost"]), action: z.enum(["status", "delete"]) }).strict(),
+    output: z.object({ exists: z.boolean(), signedIn: z.boolean(), path: z.string(), updatedAt: z.number().nullable() }).strict(),
+  },
   "bot.avatar": {
     experimental_description:
       "Inspect, replace or remove the bot's avatar image on this host (<hostData>/bot/avatar.*). set: a PNG/JPEG/WebP image ≤ 3 MiB, normalized to a square PNG.",

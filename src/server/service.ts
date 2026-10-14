@@ -5,7 +5,7 @@
 import type { BbPluginApi, ExperimentalHostClient } from "@get-bb/plugin-sdk";
 import type { z } from "zod";
 import { MAX_SEGMENTS_PAGE, type EnvReport, type HostContract, type RuntimeSnapshot } from "../shared/contract.js";
-import { MeetingUrlError, maskMeetingUrl, parseMeetingUrl, type ParsedMeetingUrl } from "../shared/meeting-url.js";
+import { MeetingUrlError, maskMeetingUrl, parseMeetingUrl, meetingIdentity, type ParsedMeetingUrl } from "../shared/meeting-url.js";
 import {
   ACTIVE_STATUSES,
   CHANNEL_CALENDAR_CHANGED,
@@ -54,6 +54,7 @@ import { notificationText } from "./notify.js";
 import { parseSpeakerSelectors, type MeetingsSettings, type SettingsHandle } from "./settings.js";
 import { describeStatus, mapRuntime, type MappedStatus } from "./status.js";
 import { ZoomAccount } from "./zoom-account.js";
+import { NotetakerService } from "./notetaker-service.js";
 
 export type HostClient = ExperimentalHostClient<HostContract>;
 type HostMethod = keyof HostContract & string;
@@ -99,6 +100,11 @@ export interface JoinRequest {
   readonly requestedByThreadId?: string | null;
   readonly notify?: boolean;
   readonly calendarKey?: string | null;
+  readonly platform?: "zoom" | "meet" | "telemost" | "jitsi";
+  readonly templateId?: string;
+  readonly autoTranscribe?: boolean;
+  readonly autoSummarize?: boolean;
+  readonly chatAnnouncement?: string;
 }
 
 /** Outcomes meetings_join / `join --wait` report right away. */
@@ -116,9 +122,12 @@ export class MeetingsService {
   readonly now: () => number;
   private readonly joinPollMs: number;
   readonly zoom: ZoomAccount;
+  readonly meet: ZoomAccount;
+  readonly telemost: ZoomAccount;
   readonly google: GoogleService;
   readonly calendar: CalendarService;
   readonly bot: BotProfileService;
+  readonly notetaker: NotetakerService;
   private envCache: { at: number; report: EnvReport } | null = null;
   private autoSetupAt = 0;
   private readonly locks = new Map<string, Promise<unknown>>();
@@ -147,9 +156,12 @@ export class MeetingsService {
     this.now = options.now ?? Date.now;
     this.joinPollMs = options.joinPollMs ?? 2_000;
     this.zoom = new ZoomAccount(bb, settings, this);
+    this.meet = new ZoomAccount(bb, settings, this, "meet");
+    this.telemost = new ZoomAccount(bb, settings, this, "telemost");
     this.google = new GoogleService(bb, settings, repo, this, options.googleEndpoints);
     this.calendar = new CalendarService(bb, settings, repo, this, options.fetchText ?? fetchIcs);
     this.bot = new BotProfileService(bb, settings, this);
+    this.notetaker = new NotetakerService(bb, settings, this);
   }
 
   // ---------- plumbing ----------
@@ -378,10 +390,10 @@ export class MeetingsService {
   async join(request: JoinRequest): Promise<MeetingRow> {
     let parsed: ParsedMeetingUrl;
     try {
-      parsed = parseMeetingUrl(request.url);
+      parsed = parseMeetingUrl(request.url, request.platform === "jitsi" ? { platform: "jitsi" } : undefined);
     } catch (error) {
       if (error instanceof MeetingUrlError) {
-        throw new MeetingsError("invalid_url", error.message, `Not a joinable Zoom link: ${error.message}`, "Pass a link like https://zoom.us/j/<number>?pwd=…");
+        throw new MeetingsError("invalid_url", error.message, `Not a joinable meeting link: ${error.message}`, "Pass a Zoom, Google Meet, Telemost or Jitsi meeting link");
       }
       throw error;
     }
@@ -389,6 +401,7 @@ export class MeetingsService {
     const now = this.now();
     const scheduledAt = request.scheduledAt ?? null;
     const future = scheduledAt !== null && scheduledAt > now + 5_000;
+    await this.notetaker.analysis.templates.get(request.templateId ?? settings.summaryTemplateId);
     const title = request.title?.trim() || defaultTitle(parsed, future ? scheduledAt : now);
     const botName = (request.botName?.trim() || settings.botName.trim() || "Notetaker").slice(0, 64);
     const base = {
@@ -399,7 +412,13 @@ export class MeetingsService {
       botName,
       source: request.source,
       createdAt: now,
-      options: request.maxDurationMinutes ? { maxDurationMinutes: request.maxDurationMinutes } : {},
+      options: {
+        ...(request.maxDurationMinutes ? { maxDurationMinutes: request.maxDurationMinutes } : {}),
+        templateId: request.templateId ?? settings.summaryTemplateId,
+        autoTranscribe: request.autoTranscribe ?? settings.autoTranscribe,
+        autoSummarize: request.autoSummarize ?? settings.autoSummarize,
+        ...(request.chatAnnouncement !== undefined ? { chatAnnouncement: request.chatAnnouncement } : {}),
+      },
       requestedByThreadId: request.requestedByThreadId ?? null,
       notify: request.notify ?? true,
       calendarKey: request.calendarKey ?? null,
@@ -421,6 +440,7 @@ export class MeetingsService {
     }
 
     const row = await this.withStartLock(async () => {
+      this.assertNotDuplicate(parsed, null);
       this.assertCapacity(settings);
       await this.assertEnvReady();
       return this.repo.insertMeeting({
@@ -437,9 +457,11 @@ export class MeetingsService {
 
   /** One bot per meeting: refuse a second live bot, or a second schedule within 30 min of an existing one. */
   private assertNotDuplicate(parsed: ParsedMeetingUrl, scheduledAt: number | null): void {
-    if (parsed.platform !== "zoom") return;
+    if (parsed.platform === "mock") return;
+    const matching = (statuses: readonly MeetingStatus[]) => this.repo.meetingsWithStatus(statuses)
+      .filter((row) => row.platform === parsed.platform && meetingIdentity(parseMeetingUrl(row.url, row.platform === "jitsi" ? { platform: "jitsi" } : undefined)) === meetingIdentity(parsed));
     if (scheduledAt === null) {
-      const [live] = this.repo.meetingsOf(parsed.platform, parsed.meetingNumber, parsed.url, [...LIVE_STATUSES]);
+      const [live] = matching([...LIVE_STATUSES]);
       if (live !== undefined) {
         throw new MeetingsError(
           "duplicate_meeting",
@@ -450,8 +472,7 @@ export class MeetingsService {
       }
     }
     const when = scheduledAt ?? this.now();
-    const scheduled = this.repo
-      .meetingsOf(parsed.platform, parsed.meetingNumber, parsed.url, ["scheduled"])
+    const scheduled = matching(["scheduled"])
       .find((row) => row.scheduledAt !== null && Math.abs(row.scheduledAt - when) < 30 * 60_000);
     if (scheduled !== undefined) {
       throw new MeetingsError(
@@ -580,18 +601,24 @@ export class MeetingsService {
 
   async buildBotConfig(row: MeetingRow, hostId: string, signal?: AbortSignal): Promise<BotConfig> {
     const settings = await this.settings.get();
-    const parsed = parseMeetingUrl(row.url);
+    const parsed = parseMeetingUrl(row.url, row.platform === "jitsi" ? { platform: "jitsi" } : undefined);
     const chromePath = await this.resolveChromePath(settings);
     const gigaamUrl = await this.discoverGigaam(settings, hostId, signal);
     let zoomProfileDir: string | null = null;
     if (settings.useZoomAccount && parsed.platform === "zoom") {
       try {
         const profile = await this.call("zoom.profile", { action: "status" }, { hostId, signal });
-        if (profile.exists) zoomProfileDir = profile.path;
+        if (profile.signedIn) zoomProfileDir = profile.path;
         else this.bb.log.warn("useZoomAccount is on but there is no signed-in Zoom profile; joining as a guest");
       } catch (error) {
         this.bb.log.warn(`Could not read the Zoom profile: ${errorMessage(error)}`);
       }
+    }
+    let browserProfileDir: string | null = zoomProfileDir;
+    if ((parsed.platform === "meet" && settings.useMeetAccount) || (parsed.platform === "telemost" && settings.useTelemostAccount)) {
+      const profile = await this.call("browser.profile", { platform: parsed.platform as "meet" | "telemost", action: "status" }, { hostId, signal });
+      if (profile.signedIn) browserProfileDir = profile.path;
+      else this.bb.log.warn(`No authenticated ${parsed.platform} profile is available; joining as a guest`);
     }
     const maxDurationMinutes = this.maxDurationMinutes(row, settings);
     return botConfigSchema.parse({
@@ -609,13 +636,15 @@ export class MeetingsService {
       waitingTimeoutSec: clampInt(settings.waitingTimeoutMinutes * 60, 30, 4 * 3600),
       silenceTimeoutSec: clampInt(settings.silenceTimeoutMinutes * 60, 0, 4 * 3600),
       screenshotIntervalSec: clampInt(settings.screenshotIntervalSec, 0, 300),
-      chatAnnouncement: settings.chatAnnouncement.slice(0, 1000),
+      chatAnnouncement: (row.options.chatAnnouncement ?? settings.chatAnnouncement).slice(0, 1000),
       speakerSelectors: parseSpeakerSelectors(settings.speakerSelectors),
       chromePath,
       zoomProfileDir,
+      browserProfileDir,
       avatar: settings.showAvatar,
       avatarVideo: null,
-      liveTranscription: settings.liveTranscription,
+      liveTranscription: settings.liveTranscription && row.options.autoTranscribe !== false,
+      autoTranscribe: row.options.autoTranscribe !== false,
       transcriber: this.transcriberConfig(settings, gigaamUrl),
       createdAt: row.createdAt,
     } satisfies BotConfig);
@@ -796,13 +825,21 @@ export class MeetingsService {
     }
 
     const patch = statusPatch(current, mapped, now);
+    const transcribeEnabled = row.options.autoTranscribe !== false;
+    if (!transcribeEnabled && mapped.botFinished && mapped.hasAudio) {
+      patch.status = "done";
+      patch.statusDetail = "Запись сохранена без распознавания";
+      patch.transcriptStatus = "none";
+      patch.transcriptProgress = null;
+      patch.transcriptError = null;
+    }
     if (failures !== row.transcriberFailures) patch.transcriberFailures = failures;
     if (options !== row.options) patch.options = { ...current.options, ...options };
-    if (patch.status === "done" && !current.transcriptFinal) {
+    if (patch.status === "done" && !current.transcriptFinal && transcribeEnabled) {
       patch.status = "processing";
       patch.statusDetail = "Загрузка транскрипта";
     }
-    if (mapped.needsTranscriber && patch.status !== "failed") await this.ensureTranscriber(current, signal);
+    if (mapped.needsTranscriber && patch.status !== "failed" && transcribeEnabled) await this.ensureTranscriber(current, signal);
     // GigaAM may have restarted on another port: rediscovering rewrites <hostData>/gigaam.json,
     // which a waiting transcriber re-reads (both sides cache the lookup for 30 s).
     if (snapshot.transcriberAlive && transcriber?.phase === "waiting_asr") {
@@ -816,12 +853,14 @@ export class MeetingsService {
     if (JSON.stringify(this.toSummary(next)) !== before) this.publishMeeting(row.id);
     if (!TERMINAL_STATUSES.has(row.status) && (next.status === "done" || next.status === "failed")) {
       await this.notify(next);
+      void this.notetaker.completed(next).catch(() => this.bb.log.warn(`Completion delivery failed for ${next.id}`));
     }
     return next;
   }
 
   /** Ask the host to (re)start the transcriber; it resumes live from the checkpoint and backs off by itself. */
   private async ensureTranscriber(row: MeetingRow, signal?: AbortSignal): Promise<void> {
+    if (row.options.autoTranscribe === false) return;
     try {
       const settings = await this.settings.get();
       const hostId = row.hostId ?? (await this.primaryHostId());
@@ -900,7 +939,8 @@ export class MeetingsService {
     if (!this.repo.claimNotification(row.id, this.now())) return;
     // A tool call that is waiting on this join reports the failure in its own result.
     if (row.status === "failed" && this.quietFailures.has(row.id)) return;
-    const text = notificationText(row, settings.autoSummaryPrompt);
+    const summaryPrompt = await this.notetaker.notificationPrompt(row).catch(() => settings.autoSummaryPrompt);
+    const text = notificationText(row, summaryPrompt);
     try {
       await this.bb.sdk.threads.send({
         threadId: row.requestedByThreadId,
@@ -999,7 +1039,7 @@ export class MeetingsService {
     await this.startDueMeetings(signal);
     await this.reconcileActive(signal);
     let busy = this.repo.countWithStatus([...ACTIVE_STATUSES]) > 0;
-    const signingIn = await this.zoom.active(signal).catch((error: unknown) => {
+    const signingIn = await Promise.all([this.zoom, this.meet, this.telemost].map((account) => account.active(signal))).then((active) => active.some(Boolean)).catch((error: unknown) => {
       this.bb.log.warn(`Zoom sign-in session check failed: ${errorMessage(error)}`);
       return false;
     });
@@ -1062,6 +1102,20 @@ export class MeetingsService {
     return next;
   }
 
+  async retry(id: string): Promise<MeetingRow> {
+    const row = this.requireMeeting(id);
+    if (row.status !== "failed" && row.status !== "cancelled") {
+      throw new MeetingsError("invalid_request", "Повторное подключение доступно для встречи с ошибкой или отменённой встречи", "Only failed or cancelled meetings can be retried");
+    }
+    if (row.hasAudio) return this.retranscribe(id);
+    return this.join({ url: row.url, title: row.title, botName: row.botName, source: row.source,
+      platform: row.platform === "mock" ? undefined : row.platform,
+      requestedByThreadId: row.requestedByThreadId, notify: row.notify,
+      maxDurationMinutes: row.options.maxDurationMinutes, templateId: row.options.templateId,
+      autoTranscribe: row.options.autoTranscribe, autoSummarize: row.options.autoSummarize,
+      chatAnnouncement: row.options.chatAnnouncement });
+  }
+
   cancel(id: string): MeetingRow {
     const row = this.requireMeeting(id);
     if (row.status !== "scheduled") {
@@ -1089,6 +1143,7 @@ export class MeetingsService {
         await this.call("meeting.delete", { meetingId: id }, { hostId: row.hostId, timeoutMs: 30_000 });
       }
       if (row.calendarKey !== null) this.repo.setCalendarEventFields(row.calendarKey, { skipped: true });
+      await this.notetaker.delete(id);
       const deleted = this.repo.deleteMeeting(id);
       this.publishMeeting(id);
       return deleted;
@@ -1121,6 +1176,7 @@ export class MeetingsService {
       // Acoustic clusters are renumbered by a new run (only ui: keys are stable, DESIGN §4.5).
       const speakerNames = Object.fromEntries(Object.entries(current.speakerNames).filter(([key]) => !key.startsWith("spk:")));
       const next = this.repo.updateMeeting(id, {
+        options: { ...current.options, autoTranscribe: true },
         status: "processing",
         statusDetail: "Распознавание заново",
         transcriptStatus: "finalizing",
@@ -1157,6 +1213,13 @@ export class MeetingsService {
       patch.summaryMd = fields.summaryMd === null || fields.summaryMd.trim() === "" ? null : fields.summaryMd;
     }
     const next = this.repo.updateMeeting(id, patch);
+    this.publishMeeting(id);
+    return next;
+  }
+
+  setTemplate(id: string, templateId: string): MeetingRow {
+    const row = this.requireMeeting(id);
+    const next = this.repo.updateMeeting(id, { options: { ...row.options, templateId } });
     this.publishMeeting(id);
     return next;
   }
@@ -1245,8 +1308,10 @@ export class MeetingsService {
       }
       return row.hostId ?? (await this.primaryHostId());
     }
-    const sessionHost = await this.zoom.sessionHost(id);
-    if (sessionHost !== null) return sessionHost;
+    for (const account of [this.zoom, this.meet, this.telemost]) {
+      const sessionHost = await account.sessionHost(id);
+      if (sessionHost !== null) return sessionHost;
+    }
     throw notFound(id);
   }
 

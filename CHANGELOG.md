@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0 — 2026-10-14
+
+- Add Google Meet, Yandex Telemost and Jitsi adapters, URL normalization, calendar link discovery and per-platform browser accounts.
+- Keep independent recording profiles/audio sinks, preserve signed-in profiles across Zoom retries, and prohibit outgoing screen sharing while retaining the avatar camera and microphone.
+- Add compact settings, per-meeting recording/transcription/analysis options, avatar generation and failed-join retry.
+- Add five summary templates, custom template editing/copying, exact applied-rule snapshots, structured decisions/tasks/risks/chapters/follow-up, speech metrics and grounded cross-meeting Q&A.
+- Use the requesting BB agent by default; optionally configure an OpenAI-compatible analysis API. Model failures never produce a fabricated successful analysis.
+- Add portable MCP stdio through the official BB CLI, authenticated stateless HTTP MCP/REST, rotatable personal access tokens and signed completion webhooks with final transcript data and explicit truncation metadata.
+- Keep external-agent integrations on the same BB registry through the authenticated CLI and optional transport adapters.
+- Cancel pending analysis/delivery on unload or meeting deletion; audio-only completion never waits for ASR.
+- Add a compact recording-file import dialog and close speaker attribution at the stop request instead of after browser cleanup.
+
 ## 0.2.0 — 2026-10-13
 
 - **Google Calendar over OAuth.** Connect a Google account on the Встречи page, with your own OAuth client (Web application, Calendar API, read-only scope, PKCE), and tick the calendars to watch.

@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-meetings",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "engines": {
     "bb": ">=0.46",
@@ -8,7 +8,7 @@
   },
   "bb": {
     "name": "Meetings",
-    "description": "A notetaker bot joins Zoom meetings from a link, records them and transcribes them locally with GigaAM v3, split by speaker.",
+    "description": "Record Zoom, Google Meet, Telemost and Jitsi with local transcription, summary templates, action items and MCP.",
     "branding": {
       "icon": "./assets/icon.svg"
     },
@@ -53,7 +53,7 @@
     "vaul": "^1.1.2",
     "vitest": "^5.0.4"
   },
-  "description": "Fireflies-style meeting notetaker for bb: a bot joins Zoom meetings from a link, records them, and transcribes them locally with GigaAM v3, split by speaker.",
+  "description": "Multi-platform meeting notetaker for bb: Zoom, Google Meet, Telemost and Jitsi; local transcription, templates, analysis, Q&A and MCP.",
   "license": "MIT",
   "author": "AiXenix (https://aixenix.com)",
   "homepage": "https://github.com/AiXenix/bb-plugin-meetings#readme",
@@ -61,6 +61,28 @@
     "type": "git",
     "url": "git+https://github.com/AiXenix/bb-plugin-meetings.git"
   },
+  "files": [
+    "dist/",
+    "assets/",
+    "components/",
+    "lib/",
+    "hooks/",
+    "skills/",
+    "docs/guide.ru.md",
+    "docs/notetaker.ru.md",
+    "docs/screenshots/",
+    "integrations/mcp/",
+    "src/",
+    "runtime/",
+    "scripts/embed-runtime.mjs",
+    "server.ts",
+    "host.ts",
+    "app.tsx",
+    "tsconfig.json",
+    "PLUGIN_OVERVIEW.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
   "keywords": [
     "bb",
     "bb-plugin",
@@ -73,7 +95,12 @@
     "russian",
     "google-calendar",
     "oauth",
-    "avatar"
+    "avatar",
+    "google-meet",
+    "telemost",
+    "jitsi",
+    "mcp",
+    "summary-templates"
   ],
   "scripts": {
     "embed": "node scripts/embed-runtime.mjs",
@@ -83,7 +110,8 @@
     "test:py": ".e2e/venv/bin/python -I runtime/transcriber/test_transcriber.py",
     "e2e:bot": "node scripts/e2e-bot-mock.mjs all",
     "e2e:server": "MEETINGS_E2E=1 vitest run test/server-e2e.test.ts",
-    "build": "bb plugin build"
+    "build": "bb plugin build",
+    "test:platforms": "node --test runtime/bot/platform-adapters.browser.test.mjs"
   },
   "bugs": {
     "url": "https://github.com/AiXenix/bb-plugin-meetings/issues"

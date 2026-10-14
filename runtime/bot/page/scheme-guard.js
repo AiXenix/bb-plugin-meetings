@@ -7,7 +7,7 @@
   const KEY = Symbol.for("mtg.schemeGuard");
   if (window[KEY]) return;
   Object.defineProperty(window, KEY, { value: true, enumerable: false });
-  const BLOCKED = /^\s*(zoommtg|zoomus|zoomusm):/i;
+  const BLOCKED = /^\s*(zoommtg|zoomus|zoomusm|yatelemost|yandex-telemost):/i;
   const blocked = (value) => {
     try {
       return BLOCKED.test(String(value instanceof URL ? value.href : value ?? ""));

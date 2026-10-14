@@ -112,7 +112,7 @@ export function registerCli(bb: BbPluginApi, service: MeetingsService): void {
       `Google Calendar: connected${status.email ? ` as ${status.email}` : ""}`,
       `Watched calendars: ${watched.map((calendar) => `${calendar.summary}${calendar.primary ? " (primary)" : ""}`).join(", ") || "none"} [${watched.length} of ${status.calendars.length}]`,
       `Last sync: ${isoMinute(status.lastSyncAt)}${status.lastError ? `, error: ${status.lastError}` : ""}`,
-      `Upcoming Zoom meetings in the next 24 h: ${status.upcomingCount} (list them: bb meetings calendar)`,
+      `Upcoming meetings in the next 24 h: ${status.upcomingCount} (list them: bb meetings calendar)`,
       `Choose calendars on ${pageLink()} -> Google Календарь.`,
     ].join("\n");
   };
@@ -127,12 +127,12 @@ export function registerCli(bb: BbPluginApi, service: MeetingsService): void {
   bb.cli.register(
     defineCli({
       name: "meetings",
-      summary: "Record and transcribe Zoom meetings with a notetaker bot",
+      summary: "Record Zoom, Google Meet, Telemost and Jitsi meetings with a notetaker bot",
       description:
-        "A bot joins Zoom from a link, records the meeting and transcribes it locally with GigaAM (Russian), split by speaker. Meeting ids look like mtg_….",
+        "A bot joins a meeting from a link, records it and transcribes locally with GigaAM. Supports summaries, templates, grounded Q&A and authenticated MCP/REST. Meeting ids look like mtg_….",
       commands: {
         api: cliCommand({
-          summary: "One JSON request per call, for agents outside bb (e.g. an OpenClaw bot): list, show, join, stop, cancel, delete, transcript, search, summary, save_summary, rename_speaker, retranscribe, logs, doctor, calendar",
+          summary: "JSON API for external agents: recordings, transcripts, analysis, Q&A, templates, settings and calendar",
           options: {
             request: {
               type: "string",
@@ -155,8 +155,8 @@ export function registerCli(bb: BbPluginApi, service: MeetingsService): void {
         }),
 
         join: cliCommand({
-          summary: "Send the notetaker bot to a Zoom meeting, now or at a given time",
-          positionals: [{ name: "url", description: "Zoom invite link (with ?pwd=…) or meeting number", required: true }],
+          summary: "Send the notetaker bot to a Zoom, Google Meet, Telemost or Jitsi meeting, now or at a given time",
+          positionals: [{ name: "url", description: "Meeting invite link (with its query) or a Zoom meeting number", required: true }],
           options: {
             title: { type: "string", description: "Meeting title (default: Zoom <number>)", placeholder: "TEXT" },
             name: { type: "string", description: "Bot display name (default: the botName setting)", placeholder: "NAME" },
@@ -169,6 +169,10 @@ export function registerCli(bb: BbPluginApi, service: MeetingsService): void {
               description: "Hard stop, e.g. 90m or 2h (default: the maxDurationMinutes setting)",
             },
             "no-notify": { type: "boolean", description: "Do not message the calling thread when the meeting ends" },
+            platform: { type: "enum", values: ["zoom", "meet", "telemost", "jitsi"] as const, description: "Explicit platform; use jitsi for a self-hosted room" },
+            template: { type: "string", description: "Summary template ID" },
+            "no-transcribe": { type: "boolean", description: "Record audio without transcription" },
+            "no-summary": { type: "boolean", description: "Skip automatic analysis" },
             wait: {
               type: "duration",
               defaultUnit: "s",
@@ -190,6 +194,10 @@ export function registerCli(bb: BbPluginApi, service: MeetingsService): void {
               botName: input.options.name ?? null,
               scheduledAt,
               maxDurationMinutes: maxMs === undefined ? null : Math.round(maxMs / 60_000),
+              platform: input.options.platform,
+              templateId: input.options.template,
+              autoTranscribe: input.options["no-transcribe"] ? false : undefined,
+              autoSummarize: input.options["no-summary"] ? false : undefined,
               source: ctx.threadId ? "agent" : "cli",
               requestedByThreadId: notify ? (ctx.threadId ?? null) : null,
               notify,
@@ -423,6 +431,40 @@ export function registerCli(bb: BbPluginApi, service: MeetingsService): void {
             const row = await service.retranscribe(input.positionals.id);
             if (input.options.json) return outJson({ meeting: agentView(service, row) });
             return out(`Re-transcribing ${row.id}. Follow progress: bb meetings show ${row.id}`);
+          }),
+        }),
+
+        analyze: cliCommand({
+          summary: "Analyze a final transcript with a summary template",
+          positionals: [idPositional],
+          options: { template: { type: "string", description: "Summary template ID" }, json },
+          run: (input) => guard(async () => {
+            const result = await service.notetaker.analyze(input.positionals.id, input.options.template);
+            return input.options.json ? outJson(result) : out(result.needsAgent ? result.prompt ?? "" : result.analysis?.summaryMd ?? "");
+          }),
+        }),
+        templates: cliCommand({
+          summary: "List summary templates and their complete rules",
+          options: { json },
+          run: (input) => guard(async () => {
+            const templates = await service.notetaker.analysis.templates.list();
+            return input.options.json ? outJson({ templates }) : out(templates.map((template) => `${template.id} | ${template.label}\n${template.prompt}`).join("\n\n"));
+          }),
+        }),
+        accounts: cliCommand({
+          summary: "Read Zoom, Google Meet and Telemost browser account status",
+          options: { json },
+          run: (input) => guard(async () => {
+            const accounts = await service.notetaker.accounts();
+            return input.options.json ? outJson({ accounts }) : out(accounts.map((account) => `${account.platform}: ${account.profile.signedIn ? "signed in" : "not signed in"}, use account: ${account.enabled ? "on" : "off"}`).join("\n"));
+          }),
+        }),
+        retry: cliCommand({
+          summary: "Retry a failed or cancelled meeting",
+          positionals: [idPositional], options: { json },
+          run: (input) => guard(async () => {
+            const row = await service.retry(input.positionals.id);
+            return input.options.json ? outJson({ meeting: agentView(service, row) }) : out(`${row.id}: ${statusLineEn(row)}`);
           }),
         }),
 

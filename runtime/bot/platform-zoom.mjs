@@ -109,6 +109,21 @@ function isLaunchUrl(url) {
   }
 }
 
+// A direct web-client link skips the regular invite page. If that entry is
+// rejected, the bounded retry follows the invite page and its browser link.
+// Keep admission parameters in memory; never log the invitation's passcode.
+function inviteRetryUrl(url) {
+  try {
+    const parsed = new URL(url);
+    if (!/(^|\.)zoom(gov)?\.(us|com)$/i.test(parsed.hostname)) return url;
+    const meeting = parsed.pathname.match(/^\/wc\/(?:join\/)?(\d{8,13})(?:\/|$)/);
+    if (!meeting) return url;
+    parsed.hostname = parsed.hostname.replace(/^app\./i, "");
+    parsed.pathname = `/j/${meeting[1]}`;
+    return parsed.toString();
+  } catch { return url; }
+}
+
 async function gotoMeeting(ctx, url) {
   const launch = isLaunchUrl(url);
   try {
@@ -183,7 +198,7 @@ export async function joinFlow(ctx, { launchPage } = {}) {
   const { config, log, setPhase, signal } = ctx;
   const sel = ctx.selectors;
   const waitMs = config.waitingTimeoutSec * 1000;
-  const url = config.joinUrl;
+  let url = config.joinUrl;
   const started = Date.now();
   await gotoMeeting(ctx, url);
   let lastGoto = Date.now();
@@ -201,6 +216,7 @@ export async function joinFlow(ctx, { launchPage } = {}) {
   let launchClicks = 0;
   let joinClickedAt = null;
   let wallRetries = 0;
+  let testJoinRequested = false;
   // One deadline for every non-waiting state (pre-join form whose Join never
   // enables, "Joining…" forever after the click, a page that stopped answering).
   let deadline = started + Math.max(JOIN_STALL_MS, waitMs);
@@ -235,7 +251,7 @@ export async function joinFlow(ctx, { launchPage } = {}) {
         wallRetries += 1;
         log("warn", `Zoom answered "Automated bots aren't allowed"; retrying (${wallRetries}/${BOT_WALL_RETRIES})`);
         await ctx.dumpDebug(`bot-wall-${wallRetries}`).catch(() => {});
-        if (!config.zoomProfileDir) await ctx.context.clearCookies().catch(() => {});
+        if (!config.browserProfileDir && !config.zoomProfileDir) await ctx.context.clearCookies().catch(() => {});
         await sleepUnless(5_000 + Math.random() * 5_000, signal);
         if (signal.aborted) throw new StopRequested();
         nameDone = false;
@@ -244,6 +260,11 @@ export async function joinFlow(ctx, { launchPage } = {}) {
         joinClicks = 0;
         lastJoinAt = 0;
         joinClickedAt = null;
+        testJoinRequested = false;
+        launchClicks = 0;
+        const retryUrl = inviteRetryUrl(url);
+        if (retryUrl !== url) log("info", "Retrying through Zoom's invitation page");
+        url = retryUrl;
         await gotoMeeting(ctx, url);
         lastGoto = Date.now();
         progress();
@@ -251,7 +272,7 @@ export async function joinFlow(ctx, { launchPage } = {}) {
       }
       throw new BotError(
         "bot_blocked",
-        'Zoom blocked the guest bot ("Automated bots aren\'t allowed to join this meeting"). Sign the bot in to a Zoom account (bb meetings zoom-login) or ask the host to allow it',
+        "Zoom отклонил вход гостевого бота. Проверьте, разрешает ли организатор гостевые подключения. Если для встречи нужен вход в Zoom, потребуется подключить аккаунт бота. Запись не началась.",
       );
     }
     if (m.captcha || (m.captchaText && !m.prejoin)) {
@@ -266,7 +287,7 @@ export async function joinFlow(ctx, { launchPage } = {}) {
     captchaSince = null;
     if (m.browserDisabled) throw new BotError("browser_join_disabled", "The host does not allow joining from a browser");
     if (m.signIn && !m.prejoin) {
-      throw new BotError("auth_required", "The meeting requires signed-in Zoom users: sign the bot in (bb meetings zoom-login) and enable useZoomAccount");
+      throw new BotError("auth_required", "Эта встреча Zoom доступна только после входа в аккаунт. Подключите Zoom-аккаунт бота или попросите организатора разрешить гостевые подключения. Запись не началась.");
     }
     if (m.ended) throw new BotError("meeting_ended", m.ended.message || "The meeting has ended");
     const zoomSays = m.notice ? ` (Zoom: "${m.notice.slice(0, 160)}")` : "";
@@ -313,6 +334,14 @@ export async function joinFlow(ctx, { launchPage } = {}) {
         () => log("info", "Clicked Zoom's Allow (microphone/camera)"),
         () => tryOp(ctx, frame, { op: "sweep" }),
       );
+    }
+    if (m.testJoin && !testJoinRequested) {
+      await sleepUnless(750, signal);
+      testJoinRequested = await frame.locator("#btnJoinTest").click({ timeout: 4000 }).then(() => true, () => false);
+      await sleepUnless(2500, signal);
+      await xdotoolKey(ctx.display, "Escape");
+      if (testJoinRequested) log("info", "Opened Zoom's official test meeting");
+      continue;
     }
     if ((launchPage || isLaunchUrl(m.url)) && m.joinFromBrowser && !m.prejoin && launchClicks < 5) {
       launchClicks += 1;
@@ -362,7 +391,10 @@ export async function joinFlow(ctx, { launchPage } = {}) {
       if (m.prejoin.name && (!nameDone || m.prejoin.nameValue !== config.botName)) {
         nameDone = await typeInto(ctx, frame, '#input-for-name, #inputname, input[placeholder="Your Name" i]', config.botName);
         log("info", nameDone ? "Typed the bot name" : "Could not type the bot name", { name: config.botName });
-        continue; // re-read the form: the Join button enables ~1 s after a valid name
+        // Allow asynchronous name/media updates to settle on a fast host,
+        // then re-read the controls instead of immediately submitting.
+        await sleepUnless(1_500, signal);
+        continue;
       }
       if (!previewDone) {
         previewDone = true;
@@ -384,6 +416,7 @@ export async function joinFlow(ctx, { launchPage } = {}) {
       lastChangeAt = now;
       log("warn", "The page has not changed for 60 s; reloading", { url: m.url, text: m.text.slice(0, 200) });
       await ctx.dumpDebug(`stall-${reloads}`).catch(() => {});
+      testJoinRequested = false;
       await gotoMeeting(ctx, url);
       lastGoto = Date.now();
     }

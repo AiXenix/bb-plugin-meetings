@@ -51,7 +51,7 @@ export function statusTone(status: MeetingStatus): StatusTone {
 export const ERROR_TEXT: Readonly<Record<BotErrorCode, string>> = {
   invalid_meeting: "Неверная ссылка или встреча ещё не началась",
   wrong_passcode: "Неверный код доступа — проверьте пароль в ссылке (pwd=…)",
-  auth_required: "Встреча только для авторизованных пользователей Zoom",
+  auth_required: "Для этой встречи нужен вход в аккаунт",
   registration_required: "Встреча требует регистрации — зарегистрируйтесь и дайте боту персональную ссылку участника",
   bot_blocked: "Zoom не пустил бота как автоматического участника — войдите в аккаунт Zoom (кнопка ниже)",
   browser_join_disabled: "Организатор запретил подключение из браузера",
@@ -65,6 +65,7 @@ export const ERROR_TEXT: Readonly<Record<BotErrorCode, string>> = {
   dependency_missing: "Не хватает компонентов — нажмите «Установить компоненты» на странице встреч",
   recording_failed: "Не удалось записать звук встречи",
   join_failed: "Не удалось подключиться к встрече",
+  join_rejected: "Сервис отклонил подключение — проверьте доступ бота и разрешение организатора",
   unknown: "Неизвестная ошибка",
 };
 

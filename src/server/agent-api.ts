@@ -12,6 +12,9 @@ import { renderText, withNames } from "./format.js";
 import { joinOutcome, statusLineEn } from "./present.js";
 import type { MeetingsService } from "./service.js";
 import { describeStatus, explainError } from "./status.js";
+import { notetakerSettingsPatchSchema } from "../shared/notetaker-settings.js";
+import { summaryTemplateInputSchema, summaryTemplateIdSchema, templateSnapshotSchema } from "../shared/analysis.js";
+import { renderTranscript, type TranscriptFormat } from "./format.js";
 
 /** Characters of transcript text per `transcript` call. */
 export const API_TRANSCRIPT_CHARS = 60_000;
@@ -40,6 +43,11 @@ export const agentRequestSchema = z.discriminatedUnion("action", [
       startAt: z.string().trim().max(64).optional(),
       maxDurationMinutes: z.number().int().min(5).max(1440).optional(),
       waitSeconds: z.number().int().min(0).max(120).default(DEFAULT_JOIN_WAIT_SEC),
+      platform: z.enum(["zoom", "meet", "telemost", "jitsi"]).optional(),
+      templateId: summaryTemplateIdSchema.optional(),
+      autoTranscribe: z.boolean().optional(),
+      autoSummarize: z.boolean().optional(),
+      chatAnnouncement: z.string().max(1000).optional(),
     })
     .strict(),
   z.object({ action: z.literal("stop"), id }).strict(),
@@ -85,6 +93,22 @@ export const agentRequestSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("logs"), id, lines: z.number().int().min(1).max(500).default(100) }).strict(),
   z.object({ action: z.literal("doctor") }).strict(),
   z.object({ action: z.literal("calendar") }).strict(),
+  z.object({ action: z.literal("meta") }).strict(),
+  z.object({ action: z.literal("settings"), patch: notetakerSettingsPatchSchema.optional() }).strict(),
+  z.object({ action: z.literal("templates") }).strict(),
+  summaryTemplateInputSchema.extend({ action: z.literal("save_template"), id: summaryTemplateIdSchema.optional(), copyFrom: summaryTemplateIdSchema.optional() }),
+  z.object({ action: z.literal("delete_template"), id: summaryTemplateIdSchema }).strict(),
+  z.object({ action: z.literal("analyze"), id, templateId: summaryTemplateIdSchema.optional() }).strict(),
+  z.object({ action: z.literal("save_insights"), id, insights: z.unknown(), templateId: summaryTemplateIdSchema.optional(), templateSnapshot: templateSnapshotSchema.optional() }).strict(),
+  z.object({ action: z.literal("insights"), id }).strict(),
+  z.object({ action: z.literal("update_action"), id, itemId: z.string().min(1).max(100), done: z.boolean() }).strict(),
+  z.object({ action: z.literal("ask"), id: id.optional(), meetingIds: z.array(id).max(50).optional(), question: z.string().trim().min(1).max(2000), query: z.string().trim().max(200).optional() }).strict(),
+  z.object({ action: z.literal("export"), id, format: z.enum(["md", "txt", "srt", "vtt", "json"]).default("md") }).strict(),
+  z.object({ action: z.literal("retry"), id }).strict(),
+  z.object({ action: z.literal("accounts") }).strict(),
+  // Internal CLI transport for a persistent MCP stdio client. It is excluded
+  // from the MCP tool catalog and from REST agent requests.
+  z.object({ action: z.literal("mcp"), request: z.unknown(), protocolVersion: z.string().max(32).optional() }).strict(),
 ]);
 export type AgentRequest = z.infer<typeof agentRequestSchema>;
 export const AGENT_ACTIONS = agentRequestSchema.options.map((option) => option.shape.action.value);
@@ -98,6 +122,7 @@ export function agentMeeting(service: MeetingsService, row: MeetingRow) {
   const totalTalk = row.speakers.reduce((sum, s) => sum + s.talkSec, 0);
   return {
     id: row.id,
+    platform: row.platform,
     title: row.title,
     status: row.status,
     statusText: describeStatus(row.status),
@@ -215,6 +240,11 @@ export async function runAgentRequest(service: MeetingsService, request: AgentRe
         botName: request.botName ?? null,
         scheduledAt: request.startAt === undefined ? null : parseStartTime(request.startAt, service.now()),
         maxDurationMinutes: request.maxDurationMinutes ?? null,
+        platform: request.platform,
+        templateId: request.templateId,
+        autoTranscribe: request.autoTranscribe,
+        autoSummarize: request.autoSummarize,
+        chatAnnouncement: request.chatAnnouncement,
         source: "agent",
         requestedByThreadId: null,
         notify: false,
@@ -227,6 +257,27 @@ export async function runAgentRequest(service: MeetingsService, request: AgentRe
     }
     case "stop":
       return { meeting: agentMeeting(service, await service.stop(request.id)) };
+    case "retry": return { meeting: agentMeeting(service, await service.retry(request.id)) };
+    case "meta": return service.notetaker.meta();
+    case "mcp": {
+      const { runMcpRequest } = await import("./mcp.js");
+      return runMcpRequest(service, request.request, request.protocolVersion, signal);
+    }
+    case "settings": return { settings: await service.notetaker.settings(request.patch) };
+    case "templates": return { templates: await service.notetaker.analysis.templates.list() };
+    case "save_template": return { template: await service.notetaker.saveTemplate(request) };
+    case "delete_template": return { deleted: await service.notetaker.deleteTemplate(request.id) };
+    case "analyze": return service.notetaker.analyze(request.id, request.templateId);
+    case "save_insights": return { analysis: await service.notetaker.saveInsights(request.id, request.insights, request.templateId, request.templateSnapshot) };
+    case "insights": return service.notetaker.analysisView(request.id);
+    case "update_action": return { analysis: await service.notetaker.action(request.id, request.itemId, request.done) };
+    case "ask": return service.notetaker.ask(request);
+    case "accounts": return { accounts: await service.notetaker.accounts() };
+    case "export": {
+      const row = service.requireMeeting(request.id);
+      const segments = withNames(service.transcriptSegments(row.id, -1, 25_000), row.speakerNames);
+      return { id: row.id, format: request.format, text: maskMeetingUrl(renderTranscript(request.format as TranscriptFormat, service.formatMeta(row), segments, row.speakerNames)).slice(0, 200_000) };
+    }
     case "cancel":
       return { meeting: agentMeeting(service, service.cancel(request.id)) };
     case "delete": {

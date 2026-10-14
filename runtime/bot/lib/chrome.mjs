@@ -1,8 +1,9 @@
 // Google Chrome for the bot: profile preparation (fresh, or a copy of the
-// signed-in Zoom profile), launch through playwright-core on the bot's Xvfb
+// signed-in account profile), launch through playwright-core on the bot's Xvfb
 // display with its PulseAudio devices, and process cleanup.
 import fs from "node:fs";
 import path from "node:path";
+import { NO_OUTGOING_SCREEN_SHARE_SCRIPT } from "./screen-share-policy.mjs";
 import { BotError, findProcesses, isAlive, killPid, sleep } from "./proc.mjs";
 
 /**
@@ -13,9 +14,9 @@ import { BotError, findProcesses, isAlive, killPid, sleep } from "./proc.mjs";
 export const SCREEN = Object.freeze({ width: 1280, height: 864 });
 export const WINDOW = Object.freeze({ width: 1280, height: 863 });
 
-const BLOCKED_SCHEMES = ["zoommtg", "zoomus", "zoomusm"];
+const BLOCKED_SCHEMES = ["zoommtg", "zoomus", "zoomusm", "yatelemost", "yandex-telemost"];
 
-/** Profile entries never copied from the persistent Zoom profile (locks, caches, crash state). */
+/** Profile entries never copied from the persistent account profile (locks, caches, crash state). */
 const SKIP_COPY = new Set([
   "SingletonLock",
   "SingletonSocket",
@@ -66,13 +67,14 @@ function deepMerge(target, source) {
  * Create (or patch) a Chrome profile: block the Zoom desktop hand-off schemes,
  * mark the last exit clean (no "restore pages" bubble), allow mic/camera,
  * silence translate/password prompts. `copyFrom` seeds it from the signed-in
- * Zoom profile.
+ * account profile.
  */
-export function prepareProfile(profileDir, { copyFrom = null, log } = {}) {
-  fs.mkdirSync(profileDir, { recursive: true });
+export function prepareProfile(profileDir, { copyFrom = null, accountName = "account", log } = {}) {
+  fs.mkdirSync(profileDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(profileDir, 0o700);
   if (copyFrom) {
     if (!fs.existsSync(copyFrom)) {
-      log?.("warn", "The signed-in Zoom profile does not exist; joining as a guest", { zoomProfileDir: copyFrom });
+      log?.("warn", "The signed-in account profile does not exist; joining as a guest");
     } else {
       fs.cpSync(copyFrom, profileDir, {
         recursive: true,
@@ -80,7 +82,7 @@ export function prepareProfile(profileDir, { copyFrom = null, log } = {}) {
         errorOnExist: false,
         filter: (src) => !SKIP_COPY.has(path.basename(src)),
       });
-      log?.("info", "Copied the signed-in Zoom profile", { from: copyFrom });
+      log?.("info", `Copied the signed-in ${accountName} profile`);
     }
   }
   const prefsFile = path.join(profileDir, "Default", "Preferences");
@@ -210,9 +212,10 @@ export async function launchChrome({ chromePath, profileDir, display, pulse, ini
       ...signals,
     });
   }
+  await context.addInitScript({ content: NO_OUTGOING_SCREEN_SHARE_SCRIPT });
   for (const content of initScripts) await context.addInitScript({ content });
   // The desktop-app hand-off never reaches the network stack, but abort it if it does.
-  await context.route(/^(zoommtg|zoomus|zoomusm):/i, (route) => route.abort()).catch(() => {});
+  await context.route(/^(zoommtg|zoomus|zoomusm|yatelemost|yandex-telemost):/i, (route) => route.abort()).catch(() => {});
   const page = context.pages()[0] ?? (await context.newPage());
   for (const extra of context.pages().slice(1)) await extra.close().catch(() => {});
   const viewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight })).catch(() => null);

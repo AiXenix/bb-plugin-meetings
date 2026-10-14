@@ -218,7 +218,7 @@ export function CalendarEventRow({
       <span className="min-w-0 flex-1 basis-full sm:basis-0">
         <span className={cn("block truncate text-sm text-foreground", event.skipped && "line-through")}>{title}</span>
         {event.url === null ? (
-          <span className="block text-xs text-muted-foreground">Нет ссылки на Zoom — бот не подключится</span>
+          <span className="block text-xs text-muted-foreground">Нет поддерживаемой ссылки — бот не подключится</span>
         ) : null}
       </span>
       <CalendarChip eventKey={event.key} />

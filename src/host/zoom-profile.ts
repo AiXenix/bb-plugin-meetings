@@ -12,6 +12,12 @@ import type { HostPaths } from "./paths.js";
 import { pathInUse } from "./probes.js";
 
 export const ZOOM_SESSION_COOKIES = ["zm_aid", "_zm_ssid", "zm_haid"] as const;
+export type AccountPlatform = "zoom" | "meet" | "telemost";
+const ACCOUNT_COOKIES = {
+  zoom: { host: "zoom.us", names: [...ZOOM_SESSION_COOKIES] },
+  meet: { host: "google.com", names: ["SID", "__Secure-1PSID", "__Secure-3PSID"] },
+  telemost: { host: "yandex.ru", names: ["Session_id", "sessionid2"] },
+} as const;
 /** Chrome ≥ 96 keeps cookies in Default/Network/Cookies; older profiles in Default/Cookies. */
 const COOKIE_DBS = [path.join("Default", "Network", "Cookies"), path.join("Default", "Cookies")];
 /** Chrome cookie times are microseconds since 1601-01-01. */
@@ -44,7 +50,7 @@ async function loadSqlite(): Promise<SqliteModule | null> {
   return sqlite;
 }
 
-async function cookiesViaSqlite(module: SqliteModule, db: string): Promise<boolean | null> {
+async function cookiesViaSqlite(module: SqliteModule, db: string, platform: AccountPlatform): Promise<boolean | null> {
   const copyDir = await fs.mkdtemp(path.join(os.tmpdir(), "meetings-cookies-"));
   try {
     const copy = path.join(copyDir, "Cookies");
@@ -53,12 +59,13 @@ async function cookiesViaSqlite(module: SqliteModule, db: string): Promise<boole
     await fs.copyFile(`${db}-wal`, `${copy}-wal`).catch(() => undefined);
     const database = new module.DatabaseSync(copy, { readOnly: true });
     try {
+      const policy = ACCOUNT_COOKIES[platform];
       const rows = database
         .prepare(
           `SELECT CAST(expires_utc AS TEXT) AS expires FROM cookies
-           WHERE (host_key = 'zoom.us' OR host_key LIKE '%.zoom.us') AND name IN (${ZOOM_SESSION_COOKIES.map(() => "?").join(",")})`,
+           WHERE (host_key = ? OR host_key LIKE ?) AND name IN (${policy.names.map(() => "?").join(",")})`,
         )
-        .all(...ZOOM_SESSION_COOKIES) as Array<{ expires: string | null }>;
+        .all(policy.host, `%.${policy.host}`, ...policy.names) as Array<{ expires: string | null }>;
       const nowUs = BigInt(Date.now()) * 1000n + CHROME_EPOCH_OFFSET_US;
       return rows.some((row) => {
         const expires = BigInt(row.expires ?? "0");
@@ -74,25 +81,26 @@ async function cookiesViaSqlite(module: SqliteModule, db: string): Promise<boole
   }
 }
 
-async function cookiesViaBytes(db: string): Promise<boolean> {
+async function cookiesViaBytes(db: string, platform: AccountPlatform): Promise<boolean> {
   const bytes = await fs.readFile(db).catch(() => null);
   if (bytes === null) return false;
-  return ZOOM_SESSION_COOKIES.some((name) => bytes.includes(Buffer.from(name, "latin1")));
+  return ACCOUNT_COOKIES[platform].names.some((name) => bytes.includes(Buffer.from(name, "latin1")));
 }
 
-export async function zoomSignedIn(profileDir: string): Promise<boolean> {
+export async function zoomSignedIn(profileDir: string, platform: AccountPlatform = "zoom"): Promise<boolean> {
   for (const relative of COOKIE_DBS) {
     const db = path.join(profileDir, relative);
     if ((await statOrNull(db)) === null) continue;
     const module = await loadSqlite();
-    const viaSqlite = module === null ? null : await cookiesViaSqlite(module, db);
-    if (viaSqlite ?? (await cookiesViaBytes(db))) return true;
+    const viaSqlite = module === null ? null : await cookiesViaSqlite(module, db, platform);
+    // Byte searches cannot establish expiry or ownership for new account types.
+    if (viaSqlite ?? (platform === "zoom" && (await cookiesViaBytes(db, platform)))) return true;
   }
   return false;
 }
 
-export async function zoomProfileStatus(paths: HostPaths): Promise<ZoomProfileStatus> {
-  const dir = paths.zoomProfile;
+export async function zoomProfileStatus(paths: HostPaths, platform: AccountPlatform = "zoom"): Promise<ZoomProfileStatus> {
+  const dir = platform === "zoom" ? paths.zoomProfile : path.join(paths.profiles, platform);
   const stat = await statOrNull(dir);
   if (stat === null || !stat.isDirectory()) return { exists: false, signedIn: false, path: dir, updatedAt: null };
   let updatedAt = stat.mtimeMs;
@@ -100,17 +108,18 @@ export async function zoomProfileStatus(paths: HostPaths): Promise<ZoomProfileSt
     const mtime = (await statOrNull(path.join(dir, relative)))?.mtimeMs;
     if (mtime !== undefined) updatedAt = Math.max(updatedAt, mtime);
   }
-  return { exists: true, signedIn: await zoomSignedIn(dir), path: dir, updatedAt: Math.round(updatedAt) };
+  return { exists: true, signedIn: await zoomSignedIn(dir, platform), path: dir, updatedAt: Math.round(updatedAt) };
 }
 
-export async function deleteZoomProfile(paths: HostPaths): Promise<ZoomProfileStatus> {
+export async function deleteZoomProfile(paths: HostPaths, platform: AccountPlatform = "zoom"): Promise<ZoomProfileStatus> {
+  const dir = platform === "zoom" ? paths.zoomProfile : path.join(paths.profiles, platform);
   const sessions = await liveLoginSessions(paths);
-  if (sessions.length > 0) {
+  if (platform === "zoom" && sessions.length > 0) {
     throw new Error(`Профиль Zoom используется сеансом входа ${sessions[0]}; завершите его перед выходом из аккаунта`);
   }
-  if (await pathInUse(paths.zoomProfile)) {
+  if (await pathInUse(dir)) {
     throw new Error("Профиль Zoom сейчас открыт в Chrome; закройте сеанс входа перед выходом из аккаунта");
   }
-  await removeTree(paths.zoomProfile);
-  return zoomProfileStatus(paths);
+  await removeTree(dir);
+  return zoomProfileStatus(paths, platform);
 }

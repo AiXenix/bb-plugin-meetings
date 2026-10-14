@@ -88,9 +88,11 @@ describe("join", () => {
       speakerSelectors: { lagMs: { tile: 900 } },
       chromePath: CHROME,
       zoomProfileDir: fake.profile.path,
+      browserProfileDir: fake.profile.path,
       avatar: true,
       avatarVideo: null,
       liveTranscription: true,
+      autoTranscribe: true,
       transcriber: { gigaamUrl: GIGAAM_URL, diarization: "ui", speakerLagMs: 500, keepRawAudio: true, threads: 0 },
       createdAt: config.createdAt,
     });
@@ -130,7 +132,7 @@ describe("join", () => {
   it("rejects bad links, missing components and a missing primary machine", async () => {
     const { harness, fake } = await load();
     await expect(harness.behavior.callRpc("meetings.join", { url: "https://meet.google.com/abc" })).rejects.toThrow(
-      /Поддерживаются только ссылки Zoom/,
+      /Нужна действующая ссылка Google Meet/,
     );
     fake.env = envReport({
       ready: false,

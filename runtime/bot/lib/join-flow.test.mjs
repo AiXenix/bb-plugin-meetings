@@ -51,7 +51,7 @@ const form = (over = {}) =>
  */
 function fakeContext(script, { waitingTimeoutSec = 60, hang = false, camera = "off" } = {}) {
   const t0 = Date.now();
-  const state = { joinClicks: 0, gotos: 0, ops: [] };
+  const state = { joinClicks: 0, gotos: 0, urls: [], cookiesCleared: 0, ops: [] };
   const locator = () => ({
     first: () => locator(),
     or: () => locator(),
@@ -82,15 +82,16 @@ function fakeContext(script, { waitingTimeoutSec = 60, hang = false, camera = "o
   const page = {
     frames: () => [],
     mainFrame: () => frame,
-    goto: async () => {
+    goto: async (url) => {
       state.gotos += 1;
+      state.urls.push(url);
     },
     keyboard: { press: async () => {}, type: async () => {} },
   };
   const phases = [];
   const ctx = {
     page,
-    context: { clearCookies: async () => {} },
+    context: { clearCookies: async () => { state.cookiesCleared += 1; } },
     config: { joinUrl: "http://127.0.0.1/mock/index.html", botName: BOT, passcode: null, waitingTimeoutSec, zoomProfileDir: null },
     selectors: {},
     display: ":nonexistent",
@@ -179,6 +180,28 @@ describe("joinFlow deadline", () => {
     const { ctx } = fakeContext((_, s) => (s.joinClicks === 0 ? form() : markers({ waitingRoom: true })), { waitingTimeoutSec: 120 });
     const result = await drive(joinFlow(ctx, { launchPage: false }), 3_600_000);
     assert.equal(result?.error?.code, "waiting_timeout");
+  });
+
+  it("recovers a rejected direct link through the invite page without losing admission parameters", async () => {
+    const { ctx, state } = fakeContext((_, s) => {
+      if (s.gotos === 1 && s.joinClicks) return markers({ botWall: true });
+      return s.joinClicks >= 2 ? markers({ inMeeting: true }) : form();
+    });
+    ctx.config.joinUrl = "https://app.zoom.us/wc/join/12345678901?pwd=fixture-pass&tk=fixture-token";
+    const result = await drive(joinFlow(ctx), 600000);
+    assert.ok(result?.ok, result?.error?.message);
+    assert.equal(state.urls[1], "https://zoom.us/j/12345678901?pwd=fixture-pass&tk=fixture-token");
+    assert.equal(state.cookiesCleared, 1);
+    assert.equal(state.joinClicks, 2);
+  });
+
+  it("preserves a signed-in account on retry and stops after the retry limit", async () => {
+    const { ctx, state } = fakeContext(() => markers({ botWall: true }));
+    ctx.config.browserProfileDir = "/private/verified-zoom-profile";
+    const result = await drive(joinFlow(ctx), 600000);
+    assert.equal(result?.error?.code, "bot_blocked");
+    assert.equal(state.cookiesCleared, 0);
+    assert.equal(state.gotos, 3);
   });
 });
 

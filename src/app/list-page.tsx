@@ -6,7 +6,8 @@ import { useRealtime } from "@get-bb/plugin-sdk/app";
 import type { CalendarEventView, CalendarStatus, MeetingSummary } from "../shared/rpc-contract";
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
-import { BotCard } from "./bot-card";
+import { AskPanel } from "./ask-panel";
+import { SettingsPanel } from "./settings-panel";
 import {
   CHANNEL_CALENDAR_CHANGED,
   CHANNEL_GOOGLE_CHANGED,
@@ -25,7 +26,6 @@ import { messageOf, useMeetingsRpc } from "./rpc";
 import type { MeetingsNav } from "./route";
 import { SearchPanel } from "./search-panel";
 import { EmptyState, ErrorText, PageFrame, Section, Spinner } from "./ui";
-import { ZoomAccountCard } from "./zoom-card";
 
 interface ListState {
   active: MeetingSummary[];
@@ -197,6 +197,7 @@ export function ListPage({ nav }: { nav: MeetingsNav }) {
       <EnvBanner env={env} />
       <JoinForm nav={nav} onJoined={refetch} />
       <SearchPanel nav={nav} />
+      <AskPanel nav={nav} />
 
       {error === null ? null : (
         <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -287,7 +288,7 @@ export function ListPage({ nav }: { nav: MeetingsNav }) {
           <Section title="Прошедшие">
             {sections.past.length === 0 ? (
               <EmptyState>
-                Записей пока нет. Вставьте ссылку на Zoom выше или попросите агента: «запиши встречу …».
+                Записей пока нет. Вставьте ссылку на встречу выше или попросите агента: «запиши встречу …».
               </EmptyState>
             ) : (
               <ul className="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
@@ -315,8 +316,7 @@ export function ListPage({ nav }: { nav: MeetingsNav }) {
         </>
       )}
 
-      <BotCard />
-      <ZoomAccountCard nav={nav} />
+      <SettingsPanel nav={nav} />
     </PageFrame>
   );
 }

@@ -67,13 +67,18 @@ function handlers(overrides: Handlers): Handlers {
       lastError: null,
       upcomingCount: 0,
     }),
+    "notetaker.settings": () => ({ settings: {} }),
     ...overrides,
   };
 }
 
 async function renderList(rpc: Handlers): Promise<RenderedSlot> {
   const app = await loadPluginApp(() => import("../../app"));
-  return renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: rpc as never, pluginId: "meetings" });
+  const slot = await renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: rpc as never, pluginId: "meetings" });
+  const settings = screen.getByText("Настройки бота, разбора и интеграций").closest("details")!;
+  act(() => { settings.open = true; fireEvent(settings, new Event("toggle")); });
+  fireEvent.click(await screen.findByRole("tab", { name: "Бот" }));
+  return slot;
 }
 
 const callsTo = (slot: RenderedSlot, method: string) =>
@@ -122,12 +127,12 @@ describe("bot card", () => {
 
     // Inline rename: an empty name is refused locally, Enter commits.
     fireEvent.click(within(section).getByRole("button", { name: "Изменить имя бота" }));
-    let input = within(section).getByRole("textbox", { name: "Имя бота в Zoom" });
+    let input = within(section).getByRole("textbox", { name: "Имя бота во встрече" });
     fireEvent.change(input, { target: { value: "  " } });
     fireEvent.keyDown(input, { key: "Enter" });
     expect((await within(section).findByRole("alert")).textContent).toBe("Имя не может быть пустым");
     fireEvent.click(within(section).getByRole("button", { name: "Изменить имя бота" }));
-    input = within(section).getByRole("textbox", { name: "Имя бота в Zoom" });
+    input = within(section).getByRole("textbox", { name: "Имя бота во встрече" });
     fireEvent.change(input, { target: { value: "Протоколист" } });
     fireEvent.keyDown(input, { key: "Enter" });
     await within(section).findByText("Протоколист");
@@ -139,7 +144,7 @@ describe("bot card", () => {
     expect(fileInput.accept).toBe("image/png,image/jpeg,image/webp");
     const png = fileFromDataUrl(TINY_PNG_DATA_URL, "avatar.png");
     fireEvent.change(fileInput, { target: { files: [png] } });
-    const preview = await within(section).findByRole("img", { name: "Камера бота в Zoom: аватар и имя «Протоколист»" });
+    const preview = await within(section).findByRole("img", { name: "Камера бота: аватар и имя «Протоколист»" });
     expect(callsTo(slot, "bot.setAvatar")).toEqual([{ imageBase64: TINY_PNG_BASE64, mimeType: "image/png" }]);
     expect(preview.getAttribute("src")).toBe(
       "/api/v1/plugins/meetings/http/bot/avatar-preview?v=5&name=%D0%9F%D1%80%D0%BE%D1%82%D0%BE%D0%BA%D0%BE%D0%BB%D0%B8%D1%81%D1%82",
@@ -178,7 +183,7 @@ describe("bot card", () => {
     );
 
     // The camera toggle.
-    const toggle = within(section).getByRole("checkbox", { name: "Показывать аватар в Zoom (камера бота)" });
+    const toggle = within(section).getByRole("checkbox", { name: "Показывать аватар во встречах (камера бота)" });
     expect(toggle.getAttribute("aria-checked")).toBe("true");
     fireEvent.click(toggle);
     await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("false"));
@@ -223,14 +228,14 @@ describe("bot card", () => {
     // Enter: focus comes back to the button, which stays focusable (aria-disabled) while saving.
     editButton().focus();
     fireEvent.click(editButton());
-    let input = within(section).getByRole("textbox", { name: "Имя бота в Zoom" });
+    let input = within(section).getByRole("textbox", { name: "Имя бота во встрече" });
     expect(document.activeElement).toBe(input);
     fireEvent.change(input, { target: { value: "Протоколист" } });
     fireEvent.keyDown(input, { key: "Enter" });
     expect(document.activeElement).toBe(editButton());
     expect(editButton().getAttribute("aria-disabled")).toBe("true");
     fireEvent.click(editButton());
-    expect(within(section).queryByRole("textbox", { name: "Имя бота в Zoom" })).toBeNull();
+    expect(within(section).queryByRole("textbox", { name: "Имя бота во встрече" })).toBeNull();
     await act(async () => saving!.resolve());
     await waitFor(() => expect(editButton().hasAttribute("aria-disabled")).toBe(false));
     expect(within(section).getByText("Протоколист")).toBeTruthy();
@@ -238,17 +243,17 @@ describe("bot card", () => {
 
     // Escape.
     fireEvent.click(editButton());
-    input = within(section).getByRole("textbox", { name: "Имя бота в Zoom" });
+    input = within(section).getByRole("textbox", { name: "Имя бота во встрече" });
     fireEvent.keyDown(input, { key: "Escape" });
     expect(document.activeElement).toBe(editButton());
 
     // A click elsewhere commits by blur and leaves the focus where the user put it.
     fireEvent.click(editButton());
-    input = within(section).getByRole("textbox", { name: "Имя бота в Zoom" });
+    input = within(section).getByRole("textbox", { name: "Имя бота во встрече" });
     fireEvent.change(input, { target: { value: "Секретарь" } });
     const upload = within(section).getByRole("button", { name: "Загрузить аватар" });
     act(() => upload.focus());
-    expect(within(section).queryByRole("textbox", { name: "Имя бота в Zoom" })).toBeNull();
+    expect(within(section).queryByRole("textbox", { name: "Имя бота во встрече" })).toBeNull();
     expect(document.activeElement).toBe(upload);
     await act(async () => saving!.resolve());
     await within(section).findByText("Секретарь");

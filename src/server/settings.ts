@@ -68,8 +68,8 @@ function googleCredential(name: string) {
 }
 
 export const DIARIZATION_LABELS: Readonly<Record<DiarizationMode, string>> = {
-  "ui+acoustic": "Интерфейс Zoom + голоса (точнее)",
-  ui: "Только по интерфейсу Zoom",
+  "ui+acoustic": "Интерфейс встречи + голоса (точнее)",
+  ui: "Только по интерфейсу встречи",
   acoustic: "Только по голосам",
 };
 
@@ -88,6 +88,24 @@ export function defineSettings(bb: BbPluginApi) {
       description:
         "Бот включает камеру и показывает картинку с аватаром и своим именем. Картинку загружают на странице «Встречи»; без неё камера выключена.",
       default: true,
+    },
+    avatarStyle: {
+      type: "select",
+      label: "Стиль аватара",
+      options: ["initials", "circle", "rounded"],
+      default: "circle",
+    },
+    avatarColor: {
+      type: "string",
+      label: "Цвет аватара",
+      experimental_schema: z.string().regex(/^#[0-9a-f]{6}$/i),
+      default: "#6366f1",
+    },
+    avatarText: {
+      type: "string",
+      label: "Инициалы на аватаре",
+      experimental_schema: z.string().max(12),
+      default: "NT",
     },
     maxDurationMinutes: {
       type: "number",
@@ -156,7 +174,7 @@ export function defineSettings(bb: BbPluginApi) {
     speakerLagMs: {
       type: "number",
       label: "Задержка индикатора спикера, мс",
-      description: "Насколько индикатор говорящего в Zoom отстаёт от голоса (0–5000). Сдвигает все сигналы относительно 700 мс: больше — реплики сдвигаются раньше.",
+      description: "Насколько индикатор говорящего во встрече отстаёт от голоса (0–5000). Сдвигает все сигналы относительно 700 мс: больше — реплики сдвигаются раньше.",
       experimental_schema: z.number().int().min(0).max(5000),
       default: 700,
     },
@@ -194,6 +212,76 @@ export function defineSettings(bb: BbPluginApi) {
         "Подключаться с профилем, в котором выполнен вход в Zoom (bb meetings zoom-login). Помогает, когда Zoom не пускает гостей-ботов.",
       default: false,
     },
+    useMeetAccount: {
+      type: "boolean",
+      label: "Входить под Google-аккаунтом",
+      description: "Использовать подключённый профиль Google Meet. Вход выполняется на странице «Встречи» отдельно от Google Calendar.",
+      default: false,
+    },
+    useTelemostAccount: {
+      type: "boolean",
+      label: "Входить под Яндекс-аккаунтом",
+      description: "Использовать подключённый профиль Яндекса для Телемоста.",
+      default: false,
+    },
+    autoTranscribe: {
+      type: "boolean",
+      label: "Распознавать записи",
+      description: "Создавать транскрипт записи. Можно выключить для записи только аудио; для отдельных встреч доступна своя настройка.",
+      default: true,
+    },
+    autoSummarize: {
+      type: "boolean",
+      label: "Разбирать встречи автоматически",
+      description: "После завершения распознавания использовать выбранный шаблон разбора. В режиме «Агент BB» просьба отправляется агенту, который запустил запись.",
+      default: true,
+    },
+    summaryMode: {
+      type: "select",
+      label: "Как выполнять ИИ-разбор",
+      options: ["agent", "api"],
+      experimental_optionLabels: { agent: "Агент BB", api: "OpenAI-совместимый API" },
+      default: "agent",
+    },
+    summaryTemplateId: {
+      type: "string",
+      label: "Шаблон разбора",
+      description: "Идентификатор готового или своего шаблона. Шаблоны и полный текст правил доступны на странице «Встречи».",
+      experimental_schema: z.string().trim().min(1).max(100),
+      default: "executive",
+    },
+    aiBaseUrl: {
+      type: "string",
+      label: "Адрес API для разбора",
+      description: "OpenAI-совместимый API, включая /v1. Используется только в режиме API.",
+      experimental_schema: urlOrEmpty,
+      default: "",
+    },
+    aiModel: {
+      type: "string",
+      label: "Модель для разбора",
+      experimental_schema: z.string().trim().max(200),
+      default: "",
+    },
+    aiApiKey: {
+      type: "string",
+      label: "Ключ API для разбора",
+      secret: true,
+      experimental_schema: z.string().max(2000),
+    },
+    webhookUrl: {
+      type: "string",
+      label: "Webhook завершения встречи",
+      description: "Получает подписанное уведомление после окончательного распознавания встречи.",
+      experimental_schema: urlOrEmpty,
+      default: "",
+    },
+    webhookSecret: {
+      type: "string",
+      label: "Секрет подписи webhook",
+      secret: true,
+      experimental_schema: z.string().max(2000),
+    },
     speakerSelectors: {
       type: "string",
       label: "Селекторы спикеров (JSON)",
@@ -219,7 +307,7 @@ export function defineSettings(bb: BbPluginApi) {
     calendarAutoJoin: {
       type: "boolean",
       label: "Подключаться к встречам из календаря",
-      description: "Автоматически отправлять бота на Zoom-встречи из календарей.",
+      description: "Автоматически отправлять бота на встречи Zoom, Meet, Телемост и Jitsi из календарей.",
       default: false,
     },
     calendarLeadMinutes: {
@@ -240,7 +328,7 @@ export function defineSettings(bb: BbPluginApi) {
     calendarFilter: {
       type: "string",
       label: "Фильтр событий",
-      description: "Подстрока названия (без учёта регистра) или /регулярное выражение/. Пусто — все события со ссылкой Zoom.",
+      description: "Подстрока названия (без учёта регистра) или /регулярное выражение/. Пусто — все события со ссылкой на поддерживаемую встречу.",
       experimental_schema: regexOrText,
       default: "",
     },

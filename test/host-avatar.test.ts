@@ -454,7 +454,7 @@ describe.skipIf(!HAS_FFMPEG)("rendering", () => {
     }
     // A short name keeps the full size: about 250 px for "Notetaker" at 52 px.
     expect(widths.at(-1)).toBeGreaterThan(200);
-  });
+  }, 15_000); // Four real ffmpeg renders plus image probes on the recording host.
 
   it("renders the MJPEG Chrome plays (10 baseline JPEG frames, 1280x720) and silence.wav, then reuses it", async () => {
     const { paths } = await withAvatar();

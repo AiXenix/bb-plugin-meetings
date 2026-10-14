@@ -764,15 +764,33 @@ class AsrClient:
             delay = min(delay * 2, BACKOFF_MAX_S)
 
     def _post(self, url, body, ctype):
-        req = urllib.request.Request(
-            url + "/v1/audio/transcriptions", data=body, method="POST",
-            headers={"Content-Type": ctype, "Content-Length": str(len(body)), "Accept": "application/json"})
-        with self._opener.open(req, timeout=ASR_TIMEOUT_S) as r:
-            obj = json.loads(r.read().decode("utf-8"))
-        text = obj["text"]
-        if not isinstance(text, str):
-            raise TypeError("response has no text")
-        return " ".join(text.split())
+        endpoints = ("/transcribe", "/v1/audio/transcriptions")
+        cache = getattr(self, "_asr_paths_by_url", {})
+        preferred = cache.get(url)
+        paths = (preferred,) + tuple(ep for ep in endpoints if ep != preferred) if preferred else endpoints
+        last_err = None
+        for ep in paths:
+            try:
+                req = urllib.request.Request(
+                    url + ep, data=body, method="POST",
+                    headers={"Content-Type": ctype, "Content-Length": str(len(body)), "Accept": "application/json"})
+                with self._opener.open(req, timeout=ASR_TIMEOUT_S) as r:
+                    obj = json.loads(r.read().decode("utf-8"))
+                text = obj["text"]
+                if not isinstance(text, str):
+                    raise TypeError("response has no text")
+                cache[url] = ep
+                self._asr_paths_by_url = cache
+                return " ".join(text.split())
+            except urllib.error.HTTPError as e:
+                last_err = e
+                if e.code in (404, 405) and len(paths) > 1:
+                    e.close()
+                    continue
+                raise
+        if last_err is not None:
+            raise last_err
+        raise RuntimeError("No ASR endpoint path succeeded")
 
     @staticmethod
     def _error_body(e):
