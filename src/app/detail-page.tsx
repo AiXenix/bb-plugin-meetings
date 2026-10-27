@@ -42,6 +42,7 @@ import {
   EmptyState,
   ErrorText,
   InlineTextInput,
+  MeetingWarning,
   Notice,
   PageFrame,
   RecordingDot,
@@ -448,6 +449,7 @@ export function DetailPage({ id, segmentId, nav }: { id: string; segmentId: numb
       <ErrorText className="mt-2 text-xs">
         {error === null ? null : `Не удалось обновить данные встречи: ${error}`}
       </ErrorText>
+      <MeetingWarning warning={meeting.warning} className="mt-3" />
 
       {problem === null || meeting.status === "cancelled" ? null : (
         <Notice tone={meeting.status === "failed" ? "danger" : "warning"} title={problem} role="alert" className="mt-3">

@@ -126,6 +126,33 @@ export const END_REASONS = [
 export const endReasonSchema = z.enum(END_REASONS);
 export type EndReason = z.infer<typeof endReasonSchema>;
 
+/** audioIssue.reason: "deaf" (no audio delivered) or "capture" (the tracks sound, the recording is silent). */
+export const AUDIO_ISSUE_REASONS = ["deaf", "capture"] as const;
+
+/**
+ * Deaf-bot guard (DESIGN §6.8, runtime/bot/lib/deaf-guard.mjs): the meeting is talking but the bot
+ * records digital silence (deaf: no audio delivered; capture: the participants' tracks sound but
+ * nothing reaches the recording). Set while the bot recovers (escalated false) and after its
+ * automatic recovery failed (escalated true: the user is warned and the requesting thread notified
+ * once); null/absent while the bot hears the meeting. A finished meeting keeps the last episode
+ * (message in the past tense) when it lasted to the end.
+ */
+export const audioIssueSchema = z.object({
+  /** Epoch ms since which the bot has heard nothing while participants were speaking. */
+  since: z.number().nullable(),
+  /** Recovery actions run in this episode. */
+  attempts: z.number().int().min(0),
+  /** The last recovery action ("rejoin_audio" | "reload"), null before the first one. */
+  lastAction: z.string().nullable(),
+  /** Russian, user-facing: what is wrong and what was tried. */
+  message: z.string(),
+  /** The automatic ladder is exhausted; absent = treat as escalated. */
+  escalated: z.boolean().optional(),
+  /** Which way the recording is empty; absent (older bots) = "deaf", an unknown value reads as absent. */
+  reason: z.enum(AUDIO_ISSUE_REASONS).optional().catch(undefined),
+});
+export type AudioIssue = z.infer<typeof audioIssueSchema>;
+
 export const botStateSchema = z.object({
   version: z.literal(1),
   meetingId: meetingIdSchema,
@@ -141,6 +168,8 @@ export const botStateSchema = z.object({
   participants: z.object({ count: z.number().int().nullable(), names: z.array(z.string()) }),
   activeSpeakers: z.array(z.string()),
   audio: z.object({ seconds: z.number(), bytes: z.number() }),
+  /** Optional (older bots never write it); a malformed value reads as null instead of hiding the whole state. */
+  audioIssue: audioIssueSchema.nullable().optional().catch(null),
   updatedAt: z.number(),
 });
 export type BotState = z.infer<typeof botStateSchema>;

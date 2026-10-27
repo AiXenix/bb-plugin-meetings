@@ -203,6 +203,38 @@ video-player {
 .footer-button__number-counter {
   margin-right: 4px;
 }
+.audio-option-menu {
+  position: relative;
+}
+.audio-option-menu__pop-menu {
+  position: absolute;
+  bottom: 56px;
+  left: 0;
+  margin: 0;
+  padding: 8px 0;
+  min-width: 220px;
+  list-style: none;
+  background: #333;
+  border-radius: 8px;
+}
+.audio-option-menu__pop-menu .dropdown-header {
+  padding: 4px 12px;
+  color: #999;
+  font-size: 12px;
+}
+.audio-option-menu__pop-menu a {
+  display: block;
+  padding: 6px 12px;
+  color: #ddd;
+  text-decoration: none;
+}
+.audio-option-menu__pop-menu a.audio-option-menu__pop-menu--checked::before {
+  content: "✓ ";
+}
+.audio-option-menu__pop-menu .divider {
+  border-top: 1px solid #555;
+  margin: 4px 0;
+}
 
 /* chat */
 .chat-header {

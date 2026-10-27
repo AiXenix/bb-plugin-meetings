@@ -4,6 +4,7 @@ import type { RuntimeSnapshot } from "../shared/contract.js";
 import type { MeetingSource, MeetingStatus, TranscriptStatus } from "../shared/rpc-contract.js";
 import {
   TERMINAL_BOT_PHASES,
+  type AudioIssue,
   type BotErrorCode,
   type EndReason,
 } from "../shared/runtime-files.js";
@@ -55,6 +56,24 @@ export interface MappedStatus {
   needsTranscriber: boolean;
   /** The bot has left (or never existed, for imports). */
   botFinished: boolean;
+  /** state.json audioIssue (deaf-bot guard, DESIGN §6.8), null when none. */
+  audioIssue: AudioIssue | null;
+  /** The Russian warning shown on the Meetings page (audioIssue.message); null = none, undefined = no bot state to tell. */
+  warning: string | null | undefined;
+}
+
+/** Longest warning text kept (the bot writes a few sentences). */
+const MAX_WARNING_CHARS = 1_000;
+
+/** The audio issue's warning text, or null. */
+export function warningFor(issue: AudioIssue | null | undefined): string | null {
+  const text = issue?.message?.trim() ?? "";
+  return text === "" ? null : text.slice(0, MAX_WARNING_CHARS);
+}
+
+/** The deaf-bot issue survived the automatic recovery: warn the requesting thread (absent flag = escalated). */
+export function audioIssueEscalated(issue: AudioIssue | null | undefined): boolean {
+  return issue !== null && issue !== undefined && issue.escalated !== false && warningFor(issue) !== null;
 }
 
 const ERROR_TEXT: Readonly<Record<BotErrorCode, { ru: string; en: string }>> = {
@@ -175,6 +194,8 @@ function emptyMapped(snapshot: RuntimeSnapshot): MappedStatus {
     screenshotMtime: snapshot.files.screenshotMtime,
     needsTranscriber: false,
     botFinished: false,
+    audioIssue: null,
+    warning: undefined,
   };
 }
 
@@ -209,6 +230,8 @@ export function mapRuntime(snapshot: RuntimeSnapshot, ctx: StatusContext): Mappe
       out.errorCode = bot.error.code;
       out.errorMessage = errorMessageFor(bot.error.code, bot.error.message);
     }
+    out.audioIssue = bot.audioIssue ?? null;
+    out.warning = warningFor(out.audioIssue);
   }
   if (out.durationSec === null || out.durationSec === 0) {
     const fromTranscriber = transcriber?.audioSec ?? 0;

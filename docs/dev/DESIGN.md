@@ -196,9 +196,22 @@ File names are `MEETING_FILES` in `src/host/paths.ts`.
   participants: { count: number | null, names: string[] },
   activeSpeakers: string[],
   audio: { seconds: number, bytes: number },   // pcm-based duration
+  audioIssue?: null | {              // deaf-bot guard (§6.8); optional, older bots omit it
+    since: number | null,            // the bot has heard nothing since (window start at detection)
+    attempts: number,                // recovery actions in this episode
+    lastAction: string | null,       // "rejoin_audio" | "reload"
+    message: string,                 // Russian, user-facing, says what was tried
+    escalated?: boolean,             // the automatic ladder failed: warn the user (absent = true)
+    reason?: "deaf" | "capture"      // no audio delivered / the tracks sound but the recording is silent
+  },                                 // (absent = "deaf"; an unknown value reads as absent)
   updatedAt: number
 }
 ```
+
+`audioIssue` is `audioIssueSchema` in `src/shared/runtime-files.ts`; a malformed
+value reads as `null` (it must never hide the rest of the state). A meeting that
+ends while the bot is deaf keeps the issue in its final state with the message
+in the past tense.
 
 `BotErrorCode` = `"invalid_meeting" | "wrong_passcode" | "auth_required" |
 "registration_required" | "bot_blocked" | "browser_join_disabled" |
@@ -428,6 +441,10 @@ export default {
   },
   /** Dismiss harmless popups; called every few seconds in the meeting. Returns the clicked labels. */
   async sweep(ctx) { return []; },
+  /** Optional: keep the meeting audio joined (every few seconds). */
+  async ensureAudio(ctx) { return { joined: true, needsJoin: false }; },
+  /** Deaf-bot recovery step "rejoin_audio" (§6.8): {ok, detail}. Never Leave/End. */
+  async recoverAudio(ctx, step) { return { ok: true, detail: "" }; },
   async sendChat(ctx, text) {},
   async leave(ctx) {},
 }
@@ -446,6 +463,14 @@ static page that imitates the Zoom web-client DOM *classes the zoom adapter
 uses for speaker detection*, plays a scripted list of audio clips with the
 matching tile highlighted, and shows a "meeting ended" message at the end. It
 is used by the end-to-end test and by `bb meetings selftest`.
+
+Mock query parameters for the deaf-bot guard (§6.8): `deaf=rejoin|reload|forever`
+(the speaking indicators work but every participant's gain is 0, so the WebRTC
+tracks and the playback are silent, until the bot leaves and joins computer
+audio through the mock's "More audio controls" menu / until the second page load
+in the tab / never), `speaker=other` (the store reports a non-default output),
+`silent=1` (no audio, nobody lit), `sticky=<name>` + `stickyAfterSec=N` (one
+indicator stays lit, like a screen share) and `loops=N` (repeat the script).
 
 ### 6.4 Speaker detection (signal fusion in the bot)
 
@@ -480,6 +505,30 @@ override them without a rebuild. At join, and when no speaker has been detected
 for 2 minutes while audio is non-silent, the bot dumps the DOM forensics
 (every `.video-avatar__avatar-footer` with ancestor class chain, classes
 matching /speak|talk|active|audio|volume|voice/) to `debug/`.
+
+**Telemost** (`platform-telemost.mjs`, the probe runs in the private-join
+iframe; checked against the web client's bundle `main.ru.0f7ed507…` and all 13
+recorded debug dumps, 2026-10-27). Names come from the tiles' titled name
+badges (`[class*='TextName_'][title]`, one name per badge). The self view
+(`selfView_`) is the bot whatever name it shows; the default guest name
+«Гость» is a participant (several guests share it); a name that is only part
+of the bot's («Анна» next to «Notetaker Анна») is a person. The speaking
+indicator is the tile's outline: the client adds the CSS-module class
+`rootStroke_<hash>` (a 4 px `::after` border) to the tile's inner root while
+the server's voice-activity flag for that slot is on and the participant is not
+muted, so several tiles can be lit at once; `store` and `tile` both carry the
+outlined names. A badge's tile is its `newGridItem_` grid item, else its
+largest ancestor holding no other badge (the grid never counts as one tile).
+The audio arrives as SFU-mixed slots (`goloom_mid_audio`: in every recorded
+meeting only the first of three tracks was ever loud, whoever spoke), so
+`sample()` passes the track levels without ids. The fusion never learns a name
+for the mixed track (it would name it after the dominant speaker and put that
+name over the outline at every turn: 3.5–4.4 % of the speaking samples in the
+replay); the deaf-bot guard still gets the levels (capture mode, recovery), and
+`signals.jsonl` keeps them as `levels`. If Telemost renames the class, `active`
+is empty again (no false speaker); the no-speaker debug dumps show it. Not yet
+seen live: the outline's lag and hold-over (the replays assume 0.8 s late),
+screen-share and paginated layouts.
 
 ### 6.5 Remote control (human in the loop)
 
@@ -521,6 +570,208 @@ research-zoom-probe.md. Keep this list, the code and `src/shared/*` in sync.
 * Bot wall → two fresh-page retries, then `bot_blocked`.
 * Speaker lag is per signal, written into each `speakers.jsonl` line (§4.3).
 * VAD min silence 0.4 s and embeddings from 1.0 s pieces (§5).
+
+### 6.8 Deaf-bot guard
+
+Incident 2026-10-27 (`mtg_mvqaselwbxfc`, Zoom): computer audio "connected"
+(`currentUser.audio=computer`, `audioConnectionStatus=2`), speaker output
+"default", video of everyone received, the active-speaker indicators busy for
+30 minutes, yet `audio.pcm` was exact zeros apart from Zoom's own 1.3 s
+"Recording in progress", and every WebRTC track level was 0 in all 1637
+`signals.jsonl` samples. Zoom simply did not deliver the participants' audio.
+
+`runtime/bot/lib/deaf-guard.mjs` (`DeafGuard`, pure, clock-injected, no
+imports) watches every sampler tick: `observe({t, speakers, botName, pcmPeak,
+trackLevels, participants})` → action | null. It catches the two ways the
+recording ends up empty while the meeting talks (`audioIssue.reason`):
+
+* **deaf**: the platform delivers no audio (the incident): recording and
+  tracks silent, the indicators busy;
+* **capture**: the participants' tracks carry sound, but none of it reaches
+  the recording (the page plays to an output that is not recorded, muted or
+  paused playback). It needs no speaking indicators, so it also works where
+  they cannot be read (a platform that changed its markup; Telemost's could
+  not be read before 0.3.1).
+
+This file, `lib/audio-recovery.mjs` and their tests are the canonical copies:
+the other products sharing this runtime take them byte-identical.
+
+* **Inputs** (bot-runner): `speakers` = the UI indicator set (`store ?? tile`,
+  bot removed), never the track-based fusion; `null` when the sample failed
+  (unknown: the guard keeps the last indicators, so a dropped sample is neither
+  a pause nor a new speaker); `trackLevels` = the track hook's per-track levels
+  (max RMS 0..1 since the last poll); `pcmPeak` = peak |sample| of the newest
+  `audio.pcm` bytes, read once per second by `PcmTail.read()` (the
+  silence-timeout reader, at least 20 s per read — more than the guard's 15 s
+  gap tolerance, so a slow tick is measured in full; whole samples only);
+  `participants` = the sample's count.
+* **Deaf** over the sliding window (`windowMs` 45 s): continuous measurements
+  of the recording, all below `silentPeak` 1e-4 (-80 dBFS), no track level
+  above 0, the bot not alone (count > 1), someone other than the bot marked
+  speaking ≥ `minSpeakingMs` 10 s with ≥ `minChanges` 2 speaker changes (an
+  observation lighting a name that the last non-empty indicator set did not:
+  A → B → A is two changes, A → dark → A none). So a silent meeting, a sticky
+  indicator (screen share, also one that flickers off and on) or a lone bot
+  never count.
+  A measurement gap > 15 s restarts the silent stretch.
+* **Open episode** (detected, until it recovers): the bot is known to be deaf,
+  and one person talking with a steady indicator looks exactly like a sticky
+  one. The silence hold and the persistent audio rejoins after the warning
+  therefore need only someone other than the bot lit for ≥ `minSpeakingMs`
+  10 s of the window, with `openMinChanges` (default 0) speaker changes. The
+  ladder steps before the warning keep the detection's 2 changes, and so does
+  a persistent action other than `rejoin_audio` (`persistentAction: "reload"`),
+  so a sticky indicator can never drive a reload. (Replayed on the real runner: with the
+  recording and the tracks zeroed, `mtg_mvgr928zgps9` left "for silence" at
+  5588 s of 7877 s with a 30 min timeout, at 3144 s with 15 min, at 1903 s with
+  10 min, and its persistent rejoins paused for 14 and 20 min while one
+  participant talked.)
+* **Capture** over the same window: continuous measurements of the recording,
+  all below -80 dBFS, the bot not alone, and the loudest track at or above
+  `captureTrackLevel` 0.01 (-40 dBFS RMS) for ≥ `captureSoundMs` 10 s
+  (observations summed like the speaking time, so they also span ≥ 10 s). The
+  threshold is several times the tracks' noise (Telemost's comfort noise reads
+  0.002–0.003) and below speech (fusion `loudRms` 0.012); played to the
+  recorded output such a track cannot leave the recording 40 dB quieter. Track
+  sound below that, or shorter, keeps the old verdict "sound" (no action, no
+  note). `capture`: `"act"` (default) runs the ladder, `"log"` only writes a
+  note, `"off"` ignores it.
+* **Ladder** (both reasons): detected → `rejoin_audio`; deaf (or capture) again
+  over the window since the step finished, at least `retryMs` 40 s later →
+  `rejoin_audio`; again → `reload`; again → `warn` (escalate); then
+  `rejoin_audio` every `persistentRetryMs` 3 min while still deaf. Every step
+  needs fresh evidence (speaker activity or track sound over a silent
+  recording) after the previous one: up to the warning the detection's
+  evidence, after it someone lit for 10 s of the window (open episode, above).
+  The issue's `reason` follows the latest evidence. One person talking alone
+  right after the detection stalls the ladder (no reload, no warning yet) but
+  holds the silence timeout; the issue (`escalated:false`) stays visible.
+* **Recovered** on sustained sound within 20 s: ≥ `recoveryReads` 4 loud
+  (≥ -80 dBFS) reads of the recording, or ≥ `recoveryTrackObs` 3 observations
+  with a sounding WebRTC track (remote participants, never local sounds),
+  either spanning ≥ `recoverySpanMs` 4 s. An episode that had capture evidence
+  recovers by the recording only: its tracks had sound all along. A click,
+  Zoom's 1.3 s local "Recording in progress" or a sub-second track burst does
+  not count. The issue clears. Deaf again within `relapseMs` 5 min of a
+  recovery is the same episode: the ladder continues where it stopped, so a
+  brief or false recovery cannot restart the ladder forever (a deaf episode
+  whose tracks come back while the recording stays silent "recovers" by the
+  deaf rule and continues one window later as a capture relapse). An escalated
+  one goes straight back to the warning (`warn` with `relapse: true`) and its
+  next audio rejoin still waits `persistentRetryMs`, counted from the
+  recovery: a flapping recovery keeps the 3-minute cadence.
+* **Silence timeout** (`silenceTimeoutSec`, default 30 min): while an episode
+  is open and the meeting talks over the last window — someone other than the
+  bot lit for 10 s (`openMinChanges` changes, 0: one person talking alone is
+  enough) or the capture evidence on the tracks, the bot not alone —
+  `guard.speakingWhileDeaf(t)` holds it (`SilenceDetector.activity`), logged
+  once if it would have fired ("…but the meeting is talking (deaf bot): staying
+  in the meeting"). Once nobody is lit (or the bot is alone) the timeout runs
+  again from that point. The price: in an open episode a sticky indicator holds
+  it too; the alone timeout, the meeting's end and `maxDurationSec` still end
+  the recording. After every recovery step the timeout restarts too, so time a
+  reload spent in the waiting room never counts as a silent meeting. Time the
+  detector did not observe is no silence either: a gap > 30 s between two of
+  its reads (sampling paused by a step, a VM resume, the clock stepping
+  forward) moves the silent stretch's start forward by the gap. (Replayed:
+  without the hold the incident bot would have left "for silence" at 12 min
+  with a 10 min timeout, 59f6a47 at 3 min with a 1 min timeout while one
+  participant talked alone.)
+* **Clock**: a wall clock that steps back more than 1 s (NTP, VM resume) drops
+  the guard's evidence (a fresh window is needed; a relapse counts from the
+  step) and clamps the open episode's `since` and escalation time to the new
+  time (no negative "Audio recovered after" duration, no `audioIssue.since` in
+  the future); the silence timeout restarts from the step; the runner
+  measures the recording, checks the audio, sweeps popups, writes
+  `signals.jsonl` and runs the no-speaker dump timer anyway (`|| now < last`)
+  instead of waiting for the clock to catch up, and never sleeps longer than
+  one sampling period (a step during a tick made the sleep as long as the
+  step). A step forward only opens a measurement gap, which never counts as
+  silence (guard and silence timeout). Not covered: the alone timeout and the
+  60 s "page stopped responding" rule still count wall-clock time across a
+  step forward.
+* **Steps** (the sampler pauses while one runs; ffmpeg keeps recording; nothing
+  ever presses Leave/End; a stop requested before a step starts skips it, so
+  the bot leaves from the meeting page instead of reloading it): `rejoin_audio`
+  = `adapter.recoverAudio(ctx, "rejoin_audio")` — Zoom/mock: pick the default
+  speaker in "More audio controls" when the store's `activeSpeaker` is not
+  default, then "Leave Computer Audio" in the same menu, join audio again with
+  the regular `audio` join op, re-mute (`zoom-page.js` op `audioMenu`; the step
+  gets its own signal and is called off after 60 s, so it never clicks on in
+  the background; called off after rejoining it still mutes once; ensureAudio
+  rejoins and re-mutes if it stopped halfway); Telemost/Meet/Jitsi
+  (`lib/audio-recovery.mjs`): restart paused media elements that play a live
+  meeting stream (`srcObject` with a live audio track) and move their
+  non-default `setSinkId` outputs back to the default. File-backed media are
+  never touched (the step logs how many it left alone): Jitsi keeps its UI
+  sounds (ringing in a loop, chimes, reactions) as paused `<audio src>`
+  elements. `reload` = bot-runner: close the speaker timeline (`src:"none"`),
+  reset `ctx.adapterState`, run `adapter.join(ctx)` (it navigates to
+  `joinUrl`; waiting room included) with `ctx.setPhase` wrapped so the phase
+  stays `in_meeting` (the join phases become the detail; a waiting room adds
+  "впустите «botName»" to the issue message). A reload that cannot get back in
+  (BotError) ends the recording with that outcome (`meeting_ended` → ended,
+  else failed).
+* **Surfaces**: `state.json audioIssue` (§4.2) from detection on
+  (`escalated:false` while the ladder runs, `true` after `warn`; `reason`
+  `"deaf"` | `"capture"`) → host snapshot → server `warning` column →
+  `MeetingSummary.warning` (live card and detail page `MeetingWarning`, CLI
+  `show` "Warning:", api `show`/`list` `warning`, `meetings_status`). The
+  message's first sentence is the title: «Бот не слышит участников встречи:
+  участники говорят, а в записи тишина.» (deaf) or «Бот слышит участников, но
+  звук не попадает в запись.» (capture), then what was tried. The requesting
+  thread gets one message (`warning_notified_at`, once per meeting) when an
+  escalated issue is seen while the meeting is `recording`; the end-of-meeting
+  message repeats the warning. events.jsonl has every decision: detection and
+  each step (warn, with the evidence: reason, window, speaking time, changes,
+  speakers, peak dBFS, track max, track sound time, participants), each step's
+  result, the escalation, "Audio recovered after …" (with `by` recording /
+  tracks), and log-only notes ("the recording is silent, but nobody is speaking
+  / the speaker indicator does not change (sticky) / the bot is alone: not
+  deaf", "…the participants' audio tracks carry sound (capture; capture mode is
+  log-only)", once per reason and silent stretch). A debug dump
+  (`debug/*-deaf.*`, with the guard's state) is taken at detection.
+* **Tuning**: `speakerSelectors.deafGuard` (any `DEAF_GUARD_DEFAULTS` key, e.g.
+  `{"capture": "log"}`, `{"openMinChanges": 2}` to also require speaker
+  changes for the open-episode hold and rejoins; `{"enabled": false}` turns it off). The mock e2e uses a
+  10 s window (`deaf-rejoin|reload|forever|silent|capture`; the mock's
+  `capture=rejoin|forever` mutes its playback while the tracks keep their
+  sound).
+* **Validated on real data** (2026-10-27, `signals.jsonl` + decoded `audio.ogg`
+  of all 14 recordings: 8 Zoom up to 2 h 11 min, 4 Telemost, the mock, the
+  incident), also through the real `BotRunner` sampling loop on a virtual
+  clock (PCM reads, silence timer, guard, recovery steps): no action on any
+  normal meeting (only the log-only notes); the incident detected at 45 s
+  (deaf), rejoin at 293 s, reload at 366 s, warning at 451 s, then audio
+  rejoins every 180–189 s from 631 s to 1760 s (59f6a47 skipped the one due at
+  1008 s: one participant talked alone from 900 to 1068 s). With the recording
+  and the tracks zeroed, `mtg_mvgr928zgps9` (7877 s) and `mtg_mvhxk0ark6pn`
+  (4348 s) are detected at 45 s, warn at 565 s and 226 s, rejoin every
+  180–189 s to the end (38 and 21 persistent rejoins) and never leave "for
+  silence" with a 10, 15 or 30 min timeout; the normal meetings that really go
+  silent still leave "for silence" exactly when 59f6a47 did (1 and 2 min
+  timeouts), and after a clock step once the timeout's worth of silence was
+  observed (59f6a47: at once after an 11 min step forward, only at the
+  meeting's end after a 1 h step back). In every 45 s window whose recording was
+  digitally silent the tracks were exactly 0, so capture mode never fired, even
+  with a track threshold of 0.0001, 0.5 s of sound and a 20 s window.
+  Telemost once its outline is read (0.3.1; the outline rebuilt from the
+  transcript, 0.8 s late, since the recorded probe never saw it): on the three
+  long Telemost recordings the guard saw speaking on 900–1600 samples and took
+  no action; with the recording and the tracks zeroed it detected at 51–282 s
+  and ran the ladder.
+* **Measured on the real web client** (zoom.us/test, 2026-10-27, steps forced
+  by a dev probe): the menu item reads "Leave computer audio"; leave + join +
+  re-mute took 2–3 s; the reload took 8.5 s and went straight back in without
+  the pre-join form (Zoom kept the session; a new participant id); the
+  recording ran through all steps. Not measured: a real deaf or capture meeting
+  recovering, a waiting room after the reload, a non-default speaker in the
+  menu.
+* **Known limitation**: a failed Telemost/Meet/Jitsi page probe returns an
+  empty sample (nobody speaking, no tracks) instead of an unknown one (Zoom's
+  failure throws and reaches the guard as `speakers: null`). It only errs
+  toward fewer detections: a dark moment is never a speaker change, and no
+  track sound is never capture evidence.
 
 ## 7. Server registry (SQLite via `bb.storage.database()`)
 
@@ -586,6 +837,7 @@ rename_speaker, retranscribe, logs, doctor, calendar. Used by agents that drive
 the bb CLI from another machine (e.g. an OpenClaw bot).
 ### 8.2 Agent tools
 
+`meetings_status` shows the deaf-bot warning (§6.8) when there is one.
 `meetings_join`, `meetings_status`, `meetings_stop`, `meetings_transcript`,
 `meetings_search`, `meetings_save_summary`, `meetings_rename_speaker`.
 `meetings_join` records the calling `threadId` (unless `notify: false`) and by
@@ -625,7 +877,9 @@ view (screenshot ~1 fps while open, "Управление" toggle → clicks on 
 and a text/key input are forwarded to the bot), audio player
 (seek on timestamp click, current segment highlight, speed), speakers panel
 (color, talk share, rename), summary (markdown), transcript grouped by speaker
-turns with in-transcript search, auto-scroll while live.
+turns with in-transcript search, auto-scroll while live. `MeetingSummary.warning`
+(the deaf-bot guard, §6.8) shows as a warning box on the live card and below the
+detail page header.
 
 ## 9. Thread notifications
 
@@ -633,7 +887,10 @@ When a meeting reaches `done` or `failed` and `requested_by_thread_id` is set
 and `notifyThread` is on, send one message to that thread with
 `bb.sdk.threads.send`: title, id, duration, speakers, how to read the
 transcript, plus `autoSummaryPrompt` (default asks the agent to save a summary
-with `meetings_save_summary`). `notified_at` makes it exactly-once. This is
+with `meetings_save_summary`). `notified_at` makes it exactly-once. While a
+meeting records, an escalated deaf-bot issue (§6.8) sends one more message
+("Встреча … идёт, но с записью проблема" + the warning), exactly once per meeting
+(`warning_notified_at`); the end message then repeats the warning. This is
 the one path that sends meeting content off the machine without a user
 request: the agent reads the transcript, so it goes to the thread's model
 provider. Meetings started from the page, a terminal or the calendar have no
@@ -688,10 +945,16 @@ events in the window, deduped by `uid + occurrence start`. Cancelled
   RPC/CLI/tools with `createFakePluginHost`.
 * Python: `runtime/transcriber/test_transcriber.py` on a synthetic 2-speaker
   Russian dialogue + fake `speakers.jsonl` against the real GigaAM server.
-* Bot unit tests: `runtime/bot/lib/*.test.mjs` (`npm run test:bot`).
+* Bot unit tests: `runtime/bot/lib/*.test.mjs` (`npm run test:bot`), incl. the
+  deaf-bot guard (`deaf-guard.test.mjs`: the incident timeline, false-positive
+  cases, recovery) and the guard inside the sampler (`deaf-runner.test.mjs`).
+  `npm run test:platforms`: page ops in headless Chrome (incl. `audioMenu`
+  against a footer with Leave/End next to the audio menu).
 * E2E (`scripts/e2e-bot-mock.mjs`, `npm run e2e:bot`): bot-runner +
   transcriber against the mock meeting page served locally; asserts phases,
-  audio, speaker names, text. `npm run e2e:server` (`MEETINGS_E2E=1`) runs the
+  audio, speaker names, text; `deaf-rejoin`, `deaf-reload`, `deaf-forever` and
+  `deaf-silent` cover the deaf-bot guard (every other scenario asserts it never
+  fires). `npm run e2e:server` (`MEETINGS_E2E=1`) runs the
   server end to end.
 * Live Zoom probe: join flow against the real Zoom web client up to the
   invalid-meeting error; a real meeting needs a human-provided link.

@@ -34,6 +34,8 @@ export const DEFAULT_SELECTORS = Object.freeze({
   lagMs: { track: 100, store: 700, tile: 1200 },
   /** Fusion tuning, see lib/fusion.mjs DEFAULT_FUSION. */
   fusion: {},
+  /** Deaf-bot guard tuning, see lib/deaf-guard.mjs DEAF_GUARD_DEFAULTS ({enabled: false} turns it off). */
+  deafGuard: {},
 });
 
 export function resolveSelectors(override) {
@@ -639,6 +641,94 @@ export async function ensureAudio(ctx) {
   return { joined: false, needsJoin };
 }
 
+/** The audio menu op ("open" | "close" | "leave" | "speaker"), null when the page did not answer. */
+const audioMenu = (ctx, action) => tryOp(ctx, zoomFrame(ctx.page), { op: "audioMenu", action }, 4_000);
+
+/** Open the "More audio controls" menu, run `action` in it, and close it again when it stayed open. */
+async function inAudioMenu(ctx, action) {
+  const opened = await audioMenu(ctx, "open");
+  if (!opened?.toggle) return { opened, result: null };
+  await sleep(opened.wasOpen ? 100 : 500);
+  const result = await audioMenu(ctx, action);
+  await sleep(300);
+  await audioMenu(ctx, "close");
+  return { opened, result };
+}
+
+/**
+ * Deaf-bot recovery (DESIGN §6.8), step "rejoin_audio": make Zoom play to the
+ * default output (the only one that is recorded), then "More audio controls"
+ * → "Leave Computer Audio" and join computer audio again through the regular
+ * audio join op, and mute. Only the audio menu and the audio button are
+ * pressed, never Leave/End. The recording keeps running. Other steps
+ * (the page reload) are the runner's. Returns {ok, detail, ...}.
+ */
+export async function recoverAudio(ctx, step) {
+  if (step !== "rejoin_audio") return { ok: false, detail: `unsupported step ${step}` };
+  const st = ctx.adapterState;
+  // Reveal the auto-hidden footer (its menu is not clickable while hidden).
+  await ctx.page.mouse.move(640, 300).catch(() => {});
+  await ctx.page.mouse.move(640, 690).catch(() => {});
+
+  // ctx.signal also fires when the runner calls an overrunning step off: every wait and loop
+  // below watches it, so nothing keeps clicking after the step has returned. A step called off
+  // between leaving and rejoining leaves audioJoined false: ensureAudio joins (and mutes) again.
+  st.speakerCheckedAt = Date.now();
+  const speakerBefore = await checkSpeaker(ctx);
+  let speaker = null;
+  if (!ctx.signal.aborted && speakerBefore !== null && speakerBefore !== "" && speakerBefore !== "default") {
+    const { result } = await inAudioMenu(ctx, "speaker");
+    speaker = result?.clicked ?? (result?.already ? "already default" : null);
+    ctx.log(result?.clicked ? "info" : "warn", result?.clicked ? `Picked the default speaker in Zoom's audio menu: ${result.clicked}` : "Could not pick the default speaker in Zoom's audio menu", {
+      before: speakerBefore,
+      items: result?.items ?? null,
+    });
+    await sleepUnless(800, ctx.signal);
+  }
+
+  let left = null;
+  let items = null;
+  for (let attempt = 0; attempt < 2 && left === null && !ctx.signal.aborted; attempt += 1) {
+    const { opened, result } = await inAudioMenu(ctx, "leave");
+    if (!opened?.toggle) break;
+    items = result?.items ?? opened.items ?? null;
+    left = result?.clicked ?? null;
+  }
+  if (left === null) {
+    ctx.log("warn", "Could not find \"Leave Computer Audio\" in Zoom's audio menu", { items });
+  } else {
+    ctx.log("info", "Left computer audio (deaf-bot recovery)", { via: left });
+    for (let i = 0; i < 10 && !ctx.signal.aborted; i += 1) {
+      const state = await tryOp(ctx, zoomFrame(ctx.page), { op: "audio", action: "state" }, 3_000);
+      if (state && !state.joined) break;
+      await sleepUnless(400, ctx.signal);
+    }
+    st.audioJoined = false;
+    await sleepUnless(1_000, ctx.signal);
+  }
+
+  let state = null;
+  const deadline = Date.now() + 25_000;
+  while (Date.now() < deadline && !ctx.signal.aborted) {
+    state = await tryOp(ctx, zoomFrame(ctx.page), { op: "audio", action: "join" }, 4_000);
+    if (state?.joined) break;
+    if (state?.clicked) ctx.log("info", "Joining computer audio", { via: state.clicked, label: state.label });
+    await sleepUnless(1_200, ctx.signal);
+  }
+  // Re-mute even when called off (once then): the bot must not stay unmuted.
+  for (let i = 0; i < (ctx.signal.aborted ? 1 : 5) && state?.joined && !state.muted; i += 1) {
+    state = await tryOp(ctx, zoomFrame(ctx.page), { op: "audio", action: "mute" }, 4_000);
+    if (state?.muted || ctx.signal.aborted) break;
+    await sleepUnless(800, ctx.signal);
+    state = await tryOp(ctx, zoomFrame(ctx.page), { op: "audio", action: "state" }, 4_000);
+  }
+  st.audioJoined = !!state?.joined;
+  ctx.log(state?.joined ? "info" : "warn", state?.joined ? "Computer audio joined again" : "Computer audio did not come back", { label: state?.label ?? null, muted: !!state?.muted });
+  const parts = [left === null ? "no Leave Computer Audio item" : "left computer audio", state?.joined ? "joined it again" : "could not join it again"];
+  if (speaker !== null) parts.unshift(`speaker: ${speaker}`);
+  return { ok: left !== null && !!state?.joined, detail: parts.join("; "), left, joined: !!state?.joined, muted: !!state?.muted, speaker: speakerBefore };
+}
+
 /** One sampling tick: raw signals + roster + end markers. */
 export async function sampleMeeting(ctx) {
   const st = ctx.adapterState;
@@ -762,6 +852,7 @@ export default {
   sample: sampleMeeting,
   sweep: sweepPopups,
   ensureAudio,
+  recoverAudio,
   sendChat,
   leave: leaveMeeting,
 };

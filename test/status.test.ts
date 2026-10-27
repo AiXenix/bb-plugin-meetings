@@ -1,13 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { RuntimeSnapshot } from "../src/shared/contract.js";
-import type { BotState, TranscriberState } from "../src/shared/runtime-files.js";
+import { botStateSchema, type BotState, type TranscriberState } from "../src/shared/runtime-files.js";
 import {
   BOT_START_GRACE_MS,
   MAX_TRANSCRIBER_FAILURES,
   TRANSCRIBER_STALL_MS,
+  audioIssueEscalated,
   errorMessageFor,
   explainError,
   mapRuntime,
+  warningFor,
   type StatusContext,
 } from "../src/server/status.js";
 import { botState, transcriberState } from "./server-fixtures.js";
@@ -281,5 +283,45 @@ describe("error texts", () => {
     expect(explainError("captcha")).toContain("капчу");
     expect(explainError("captcha", "en")).toContain("captcha");
     expect(errorMessageFor("unknown", null)).toBe("Неизвестная ошибка");
+  });
+});
+
+describe("deaf-bot warning (state.json audioIssue)", () => {
+  const issue = { since: NOW - 60_000, attempts: 3, lastAction: "reload", message: "  Бот не слышит участников встречи: участники говорят, а в записи тишина.  ", escalated: true };
+
+  it("maps the bot's audioIssue to the warning while recording and after the bot finished", () => {
+    const live = mapRuntime(snap({ bot: { phase: "in_meeting", audioIssue: issue } }), ctx);
+    expect(live.status).toBe("recording");
+    expect(live.warning).toBe("Бот не слышит участников встречи: участники говорят, а в записи тишина.");
+    expect(live.audioIssue).toEqual(issue);
+    const ended = mapRuntime(snap({ bot: { phase: "ended", endReason: "meeting_ended", audioIssue: issue }, botAlive: false, audioBytes: 10 }), { ...ctx, status: "recording" });
+    expect(ended.status).toBe("processing");
+    expect(ended.warning).toContain("Бот не слышит");
+  });
+
+  it("is null without an issue, and unknown without a bot state", () => {
+    expect(mapRuntime(snap({ bot: { phase: "in_meeting" } }), ctx).warning).toBeNull();
+    expect(mapRuntime(snap({ bot: { phase: "in_meeting", audioIssue: null } }), ctx).warning).toBeNull();
+    expect(mapRuntime(snap({ bot: null, botAlive: true }), ctx).warning).toBeUndefined();
+  });
+
+  it("escalated: absent counts as escalated, false does not, an empty message never does", () => {
+    expect(audioIssueEscalated(issue)).toBe(true);
+    expect(audioIssueEscalated({ ...issue, escalated: undefined })).toBe(true);
+    expect(audioIssueEscalated({ ...issue, escalated: false })).toBe(false);
+    expect(audioIssueEscalated({ ...issue, message: " " })).toBe(false);
+    expect(audioIssueEscalated(null)).toBe(false);
+    expect(warningFor({ ...issue, message: "x".repeat(5000) })).toHaveLength(1000);
+  });
+
+  it("carries the capture reason through, and reads an unknown reason as absent", () => {
+    const capture = { ...issue, message: "Бот слышит участников, но звук не попадает в запись. Пробую восстановить звук.", reason: "capture" as const };
+    const live = mapRuntime(snap({ bot: { phase: "in_meeting", audioIssue: capture } }), ctx);
+    expect(live.audioIssue?.reason).toBe("capture");
+    expect(live.warning).toMatch(/^Бот слышит участников, но звук не попадает в запись\./);
+    const parsed = botStateSchema.parse({ ...botState(ID, { phase: "in_meeting" }), audioIssue: { ...issue, reason: "something-new" } });
+    expect(parsed.audioIssue).not.toBeNull();
+    expect(parsed.audioIssue?.reason).toBeUndefined();
+    expect(parsed.audioIssue?.message).toContain("Бот не слышит");
   });
 });

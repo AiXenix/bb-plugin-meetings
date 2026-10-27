@@ -17,6 +17,18 @@
 //   previewVideo=off   the pre-join camera starts off ("Start Video"), as Zoom does for some users
 //   joinVideo=off      the camera is off after entering whatever the preview said (the bot must press Start Video)
 //   cameraDelaySec=N   the camera takes N s to start; like Zoom, the button says Start Video and is disabled meanwhile
+//   deaf=rejoin|reload|forever  the speaking indicators work but nobody's audio reaches the bot (silent
+//                      WebRTC tracks, silent playback) until it leaves and joins computer audio again
+//                      ("More audio controls" → "Leave Computer Audio", then Join Audio) / reloads the
+//                      page (the second page load in this tab plays) / never (DESIGN §6.8)
+//   capture=rejoin|forever  the participants' WebRTC tracks carry their sound, but the page plays none of it
+//                      (muted playback: nothing reaches the recorded output) until the bot leaves and joins
+//                      computer audio again / never (the deaf-bot guard's capture mode, DESIGN §6.8)
+//   speaker=other      Zoom's store says the meeting plays to a non-default output ("Mock Speaker 2")
+//   silent=1           the script plays no audio and lights nobody (a silent meeting)
+//   sticky=<name>      that participant's indicator stays lit for the rest of the meeting (a screen share),
+//                      from stickyAfterSec=N s after entering (default 0)
+//   loops=N            play the script N times (longer meetings)
 //   log=<url>          where events are POSTed (default ./log next to this page)
 (() => {
   "use strict";
@@ -43,8 +55,25 @@
     previewVideo: params.get("previewVideo") !== "off",
     joinVideo: params.get("joinVideo") !== "off",
     cameraDelaySec: num("cameraDelaySec", 0),
+    deaf: params.get("deaf") || "",
+    capture: params.get("capture") || "",
+    speaker: params.get("speaker") === "other" ? "mock-speaker-2" : "default",
+    silent: params.get("silent") === "1",
+    sticky: params.get("sticky") || "",
+    stickyAfterSec: num("stickyAfterSec", 0),
+    loops: Math.max(1, Math.floor(num("loops", 1))),
     logUrl: params.get("log") || new URL("log", location.href).href,
   };
+  // Page loads in this tab: deaf=reload is deaf on the first load only.
+  const loads = (() => {
+    try {
+      const n = Number(sessionStorage.getItem("mock.loads") || 0) + 1;
+      sessionStorage.setItem("mock.loads", String(n));
+      return n;
+    } catch {
+      return 1;
+    }
+  })();
 
   const DEFAULT_SCRIPT = [
     { speaker: "Анна Смирнова", tone: { freq: 220, durationSec: 4 }, gapSec: 1 },
@@ -320,6 +349,70 @@
     report("audio-button", { state: $("#audio-button").dataset.state });
   });
 
+  // ------------------------------------------------------------ deaf modes (DESIGN §6.8)
+
+  let deaf = opt.deaf === "rejoin" || opt.deaf === "forever" || (opt.deaf === "reload" && loads === 1);
+  let leftAudio = false;
+
+  /** Deaf = every participant's gain at 0: their WebRTC tracks carry digital silence and nothing plays. */
+  function applyDeaf() {
+    if (!engine) return;
+    for (const gain of engine.outs.values()) gain.gain.value = deaf ? 0 : 1;
+  }
+
+  function setDeaf(on, why) {
+    if (deaf === on) return;
+    deaf = on;
+    applyDeaf();
+    report("deaf", { on, why, loads });
+  }
+
+  // Capture broken = the tracks carry sound (the bot's track hook measures them), but every player is muted.
+  let captureBroken = opt.capture === "rejoin" || opt.capture === "forever";
+
+  function applyCapture() {
+    for (const player of engine?.players ?? []) player.muted = captureBroken;
+  }
+
+  function setCapture(on, why) {
+    if (captureBroken === on) return;
+    captureBroken = on;
+    applyCapture();
+    report("capture", { on, why, loads });
+  }
+
+  // ------------------------------------------------------------ audio menu ("More audio controls")
+
+  let activeSpeaker = opt.speaker;
+  const audioMenu = $("#audio-menu");
+  function renderAudioMenu() {
+    for (const item of audioMenu.querySelectorAll("[data-speaker]")) {
+      item.classList.toggle("audio-option-menu__pop-menu--checked", item.dataset.speaker === activeSpeaker);
+      item.setAttribute("aria-checked", item.dataset.speaker === activeSpeaker ? "true" : "false");
+    }
+  }
+  function setAudioMenu(open) {
+    audioMenu.hidden = !open;
+    $("#audioOptionMenu [role=group]").setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) renderAudioMenu();
+  }
+  $("#audio-menu-toggle").addEventListener("click", () => setAudioMenu(audioMenu.hidden));
+  audioMenu.addEventListener("click", (event) => {
+    const item = event.target.closest("a");
+    if (!item) return;
+    event.preventDefault();
+    setAudioMenu(false);
+    if (item.dataset.speaker) {
+      activeSpeaker = item.dataset.speaker;
+      store.dispatch({ type: "mock/patch", patch: { audio: { ...store.getState().audio, activeSpeaker } } });
+      report("speaker-selected", { deviceId: activeSpeaker });
+    } else if (item.id === "leave-computer-audio") {
+      leftAudio = true;
+      setAudioButton("none");
+      report("audio-left", {});
+    }
+  });
+
   function showModal(html, { onButton } = {}) {
     const modal = document.createElement("div");
     modal.className = "zm-modal";
@@ -340,6 +433,8 @@
       onButton: () => {
         setAudioButton("live");
         report("audio-joined", {});
+        if (opt.deaf === "rejoin" && leftAudio) setDeaf(false, "rejoined computer audio");
+        if (opt.capture === "rejoin" && leftAudio) setCapture(false, "rejoined computer audio");
       },
     });
   }
@@ -445,6 +540,7 @@
         const players = [];
         receiver.ontrack = (event) => {
           const player = new Audio();
+          player.muted = captureBroken;
           player.srcObject = new MediaStream([event.track]);
           player.play().catch(() => {});
           players.push(player);
@@ -515,13 +611,14 @@
   // ------------------------------------------------------------ script
 
   async function loadScript() {
-    if (!opt.script) return { items: DEFAULT_SCRIPT, base: location.href };
+    const repeat = (items) => Array.from({ length: opt.loops }, () => items).flat();
+    if (!opt.script) return { items: repeat(DEFAULT_SCRIPT), base: location.href };
     const url = new URL(opt.script, location.href).href;
     const response = await fetch(url);
     if (!response.ok) throw new Error(`script ${url}: HTTP ${response.status}`);
     const items = await response.json();
     if (!Array.isArray(items) || items.length === 0) throw new Error("script must be a non-empty JSON array");
-    return { items, base: url };
+    return { items: repeat(items), base: url };
   }
 
   /**
@@ -548,6 +645,8 @@
     });
     let speaking = 0;
     for (const { item, startSec, durationSec } of plan) {
+      // A silent meeting: the timeline runs, but nobody talks and nobody is lit.
+      if (opt.silent) continue;
       const out = engine.outs.get(item.speaker);
       if (item.clip) playClip(ctx, out, buffers.get(item.clip), audioZero + startSec);
       else playTone(ctx, out, item.tone || {}, audioZero + startSec);
@@ -564,7 +663,7 @@
         speaking -= 1;
         setSpeaking(item.speaker, false);
         if (speaking === 0) status(`${engine.mode}: —`);
-        report("utterance", { speaker: item.speaker, start: Math.round(start), end: Math.round(end), clip: item.clip ?? null, durationSec });
+        report("utterance", { speaker: item.speaker, start: Math.round(start), end: Math.round(end), clip: item.clip ?? null, durationSec, deaf, loads });
       }, end - Date.now());
     }
     const last = Math.max(...plan.map((p) => p.startSec + p.durationSec));
@@ -640,10 +739,22 @@
     const brief = (kind) => devices.filter((d) => d.kind === kind).map((d) => ({ deviceId: d.deviceId, label: d.label }));
     store.dispatch({
       type: "mock/patch",
-      patch: { audio: { ...store.getState().audio, activeSpeaker: "default", speakerDevicesList: brief("audiooutput"), activeMicrophone: "default", microphoneDevicesList: brief("audioinput") } },
+      patch: { audio: { ...store.getState().audio, activeSpeaker, speakerDevicesList: brief("audiooutput"), activeMicrophone: "default", microphoneDevicesList: brief("audioinput") } },
     });
     await setupAudio(participants);
-    status(`${engine.mode}: ready`);
+    applyDeaf();
+    applyCapture();
+    if (opt.deaf) report("deaf", { on: deaf, why: "page load", loads });
+    if (opt.capture) report("capture", { on: captureBroken, why: "page load", loads });
+    if (opt.sticky && participants.includes(opt.sticky)) {
+      // Like a screen share: one tile stays the active one; nothing changes.
+      setTimeout(() => {
+        if (left) return;
+        setSpeaking(opt.sticky, true);
+        report("sticky", { speaker: opt.sticky });
+      }, opt.stickyAfterSec * 1000);
+    }
+    status(`${engine.mode}: ready${deaf ? " (deaf)" : ""}${captureBroken ? " (capture broken)" : ""}`);
     await runScript(items, base);
   }
 

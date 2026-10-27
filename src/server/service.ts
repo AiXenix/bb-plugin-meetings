@@ -50,9 +50,9 @@ import { MeetingsError, errorMessage, notFound, sleep } from "./errors.js";
 import type { FormatMeeting } from "./format.js";
 import type { GoogleEndpoints } from "./google-auth.js";
 import { GoogleService } from "./google-service.js";
-import { notificationText } from "./notify.js";
+import { notificationText, warningNotificationText } from "./notify.js";
 import { parseSpeakerSelectors, type MeetingsSettings, type SettingsHandle } from "./settings.js";
-import { describeStatus, mapRuntime, type MappedStatus } from "./status.js";
+import { audioIssueEscalated, describeStatus, mapRuntime, type MappedStatus } from "./status.js";
 import { ZoomAccount } from "./zoom-account.js";
 import { NotetakerService } from "./notetaker-service.js";
 
@@ -296,6 +296,7 @@ export class MeetingsService {
       screenshotVersion: row.screenshotMtime,
       hasSummary: row.summaryMd !== null && row.summaryMd.trim() !== "",
       requestedByThreadId: row.requestedByThreadId,
+      warning: row.warning,
     };
   }
 
@@ -851,6 +852,7 @@ export class MeetingsService {
     }
     const next = this.repo.updateMeeting(row.id, patch, now);
     if (JSON.stringify(this.toSummary(next)) !== before) this.publishMeeting(row.id);
+    if (next.status === "recording" && audioIssueEscalated(mapped.audioIssue)) await this.notifyWarning(next);
     if (!TERMINAL_STATUSES.has(row.status) && (next.status === "done" || next.status === "failed")) {
       await this.notify(next);
       void this.notetaker.completed(next).catch(() => this.bb.log.warn(`Completion delivery failed for ${next.id}`));
@@ -949,6 +951,27 @@ export class MeetingsService {
       });
     } catch (error) {
       this.bb.log.warn(`Could not notify thread ${row.requestedByThreadId} about ${row.id}: ${errorMessage(error)}`);
+    }
+  }
+
+  /**
+   * The live deaf-bot warning (DESIGN §6.8): once per meeting, only while it still records
+   * (afterwards the end-of-meeting message carries the warning).
+   */
+  private async notifyWarning(row: MeetingRow): Promise<void> {
+    if (row.requestedByThreadId === null || !row.notify || row.warningNotifiedAt !== null) return;
+    const settings = await this.settings.get();
+    if (!settings.notifyThread) return;
+    if (!this.repo.claimWarningNotification(row.id, this.now())) return;
+    this.bb.log.warn(`Meeting ${row.id}: the bot cannot hear the participants; warning thread ${row.requestedByThreadId}`);
+    try {
+      await this.bb.sdk.threads.send({
+        threadId: row.requestedByThreadId,
+        mode: "queue-if-active",
+        input: [{ type: "text", text: warningNotificationText(row), mentions: [] }],
+      });
+    } catch (error) {
+      this.bb.log.warn(`Could not warn thread ${row.requestedByThreadId} about ${row.id}: ${errorMessage(error)}`);
     }
   }
 
@@ -1521,5 +1544,7 @@ function statusPatch(row: MeetingRow, mapped: MappedStatus, now: number): Meetin
     activeSpeakers: mapped.status === "recording" ? mapped.activeSpeakers : [],
     hasAudio: mapped.hasAudio || row.hasAudio,
     screenshotMtime: mapped.screenshotMtime ?? row.screenshotMtime,
+    // The bot's current word: a recovered bot clears it; a snapshot without state.json keeps the last one.
+    warning: mapped.warning === undefined ? row.warning : mapped.warning,
   };
 }

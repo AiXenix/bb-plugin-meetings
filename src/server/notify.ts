@@ -1,5 +1,6 @@
 // The one message a requesting thread gets when its meeting finishes
-// (docs/dev/DESIGN.md §9). Pure text building; the service sends it once.
+// (docs/dev/DESIGN.md §9), and the one-time live warning when the bot cannot
+// hear the meeting (§6.8). Pure text building; the service sends each once.
 import { maskMeetingUrl } from "../shared/meeting-url.js";
 import type { MeetingRow } from "./db.js";
 import { humanDuration } from "./format.js";
@@ -35,6 +36,7 @@ export function notificationText(row: MeetingRow, summaryPrompt: string): string
     if (row.errorCode !== null) {
       lines.push(`Запись прервалась раньше времени: ${explainError(row.errorCode)}. Транскрипт содержит то, что успели записать.`);
     }
+    if (row.warning !== null) lines.push(`Внимание: ${row.warning}`);
     if (row.options.autoTranscribe === false) {
       lines.push(`Аудиозапись доступна на странице встречи; распознать позже: \`bb meetings retranscribe ${row.id}\`.`);
     } else if (row.segmentsCount === 0) {
@@ -56,8 +58,22 @@ export function notificationText(row: MeetingRow, summaryPrompt: string): string
         `Частичный транскрипт (${row.segmentsCount} сегм.) доступен: инструмент meetings_transcript (id: "${row.id}") или \`bb meetings transcript ${row.id}\`.`,
       );
     }
+    if (row.warning !== null) lines.push(`Внимание: ${row.warning}`);
     lines.push(`Подробности: \`bb meetings show ${row.id}\`, журнал: \`bb meetings logs ${row.id}\`. Ссылка: ${link}`);
   }
   // Bot error messages may quote the join URL.
+  return maskMeetingUrl(lines.join("\n"));
+}
+
+/**
+ * The live deaf-bot warning (DESIGN §6.8): sent once per meeting while it is
+ * still recording, after the bot's automatic recovery did not bring the sound back.
+ */
+export function warningNotificationText(row: MeetingRow): string {
+  const lines = [
+    `Встреча «${row.title}» (${row.id}) идёт, но с записью проблема.`,
+    row.warning ?? "Бот не слышит участников встречи.",
+    `Бот остаётся во встрече и продолжает попытки. Состояние: \`bb meetings show ${row.id}\` или инструмент meetings_status; остановить: \`bb meetings stop ${row.id}\`.`,
+  ];
   return maskMeetingUrl(lines.join("\n"));
 }

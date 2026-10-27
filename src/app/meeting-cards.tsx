@@ -11,7 +11,7 @@ import { useAsyncAction } from "./hooks";
 import { ERROR_TEXT, calendarSourceLabel, errorText, liveHint, speakingLabel } from "./labels";
 import { useMeetingsRpc } from "./rpc";
 import type { MeetingsNav } from "./route";
-import { Chip, ElapsedClock, ErrorText, RecordingDot, Spinner, StatusChip } from "./ui";
+import { Chip, ElapsedClock, ErrorText, MeetingWarning, RecordingDot, Spinner, StatusChip } from "./ui";
 
 export function meetingTitle(meeting: Pick<MeetingSummary, "title">): string {
   return meeting.title.trim() === "" ? "Встреча без названия" : meeting.title;
@@ -102,6 +102,7 @@ export function LiveMeetingCard({
           ) : null}
         </dl>
         {problem === null ? null : <p className="text-xs text-warning-text">{problem}</p>}
+        <MeetingWarning warning={meeting.warning} compact className="mt-2" />
         <ErrorText className="text-xs">{stop.error}</ErrorText>
       </div>
       <div className="flex shrink-0 items-start">

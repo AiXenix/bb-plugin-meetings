@@ -127,6 +127,14 @@ Everything else is in the CLI (`bb meetings --help`): `list`, `show`, `cancel`,
 - `maxConcurrentBots` (default 2) parallel recordings.
 - The bot leaves when the host ends the meeting, when it is alone for 2 min,
   or after 30 min of silence (`aloneTimeoutMinutes`, `silenceTimeoutMinutes`).
+- A `Warning:` line in `meetings_status` / `bb meetings show` (`warning` in the
+  JSON) such as «Бот не слышит участников встречи…» means the platform shows
+  people speaking but the recording is silent; «Бот слышит участников, но звук
+  не попадает в запись…» means the bot receives the participants' audio but
+  none of it reaches the recording. Either way the bot recovers by itself
+  (rejoins the meeting audio, reloads the page) and the warning says what it
+  tried; pass it on to the user. If it persists, suggest stopping the bot and
+  joining again. The thread gets one message about it while the meeting runs.
 - The bot is visible to every participant; participants should know they are
   being recorded.
 

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<!--
+  Anonymized Telemost conference grid (private-join iframe document), cut from a
+  real BB Meetings debug dump: meeting mtg_mvgistzrlos8, 2026-10-21T07-12-18
+  "no-speaker" dump, Telemost web client bundle main.ru.0f7ed507b4b88e94d769.js.
+  Real names replaced ("Test Bot" = the recorder bot; "Гость" is Telemost's
+  default display name for an anonymous guest and is kept on purpose), avatar
+  URLs, track ids and SVG paths removed, scripts and external CSS dropped.
+
+  State as captured: 4 tiles in a 2x2 grid.
+    tile 1  selfView_  "Test Bot"      (the bot itself, muted, moderator)
+    tile 2             "Test Bot"      (a second bot with the same name, unmuted, silent)
+    tile 3             "Alice Example" rootWithoutVideo + rootStroke -> speaking
+    tile 4             "Гость"         rootWithoutVideo + rootStroke  -> speaking
+  The speaking marker is the CSS-module class rootStroke_<hash> on the tile's
+  inner root div (class root_<hash>). Telemost's own CSS draws it as
+    .rootStroke_Kb2PJ:after{content:"";border:4px solid var(--orb-surface-brand);
+      border-radius:var(--orb-rounding-4-m);z-index:10;pointer-events:none;position:absolute;inset:0}
+  and the client sets it for (slot.vad && participant audio not muted).
+  Expected probe (botName "Test Bot"): names ["Alice Example","Гость"],
+  active ["Alice Example","Гость"], totalParticipants 4, inMeeting true.
+-->
+<html lang="ru"><head><meta charset="utf-8"><title>telemost grid fixture</title>
+<style>
+  body { margin: 0; width: 1280px; height: 720px; background: #1b1b1f; font: 14px sans-serif; color: #fff; }
+  [data-video-root] { position: relative; width: 1280px; height: 650px; }
+  .GoloomParticipantsRenderer { position: absolute; inset: 0; }
+  .item_NZ2DW { position: absolute; left: 0; top: 0; overflow: hidden; border-radius: 12px; background: #2a2a30; }
+  .root_ypmDo { position: absolute; inset: 0; }
+  .rootStroke_Kb2PJ:after { content: ""; border: 4px solid #3c3; border-radius: 12px; z-index: 10; pointer-events: none; position: absolute; inset: 0; }
+  .NameWrapper_m54f1 { position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); }
+  .TextName_BOaIg { display: inline-block; padding: 2px 8px; background: rgba(0,0,0,.5); border-radius: 8px; }
+  video { display: block; }
+  .AvatarBlock_dvP2b, .ParticipantIcon_j7Luc { width: 120px; height: 120px; }
+  .toolbar { position: absolute; bottom: 8px; left: 0; right: 0; text-align: center; }
+</style></head>
+<body>
+<div data-video-root="true" class="container_nMblC newGridContainer_FUFOw"><div class="GoloomParticipantsRenderer"><div class="item_NZ2DW newGridItem_X3tXt selfView_ahfAh itemDevices_0il2o" style="transform: translate(68px, 5px); width: 560px; height: 315px;"><div style="position: relative; width: 100%; height: 100%;"><video playsinline="" x-yandex-pip="false" data-g_track_id="00000000-0000-4000-8000-000000000001" data-g_track_muted="false" data-g_track_enabled="true" data-g_track_state="live" style="width: 100%; max-width: 100%; height: 100%; transform: scaleX(-1);"></video><div class="root_ypmDo rootTeleMessenger_wJjaB rootModerator_F9M6t"><div class="avatarWithNameBlock_AOhPP"><div class="root_uWsTl" data-testid="participant-video-placeholder"><div class="AvatarBlock_dvP2b"></div></div><div class="NameWrapper_m54f1 participantName_tl1zI"><div class="Name_87gi-"><span class="TextName_BOaIg" title="Test Bot">Test Bot</span><button type="button" tabindex="0" data-react-aria-pressable="true" aria-label="Включить микрофон" class="Orb-Button Orb-Button_onlyIcon Orb-Button_size_xs Orb-Button_view_neutral-transparent important_EJt50 ModerationControlButton_5pq6W MicrophoneControl_BLmvQ moderationControlButtonContainer_7QrwL" role="button" data-testid="mute-audio" title="Включить микрофон"><div class="Orb-Button-Content"><span class="Orb-Button-LeftSlot"><div class="ModerationButtonIcon_uicmp"><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" focusable="false" fill="none" aria-hidden="true" width="16" height="16" viewBox="0 0 16 16"><path fill="currentColor" d="M0 0h1v1H0z"></path></svg></div></span></div></button><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" focusable="false" fill="none" class="MicroOffIcon_qtQJ7 MicrophoneStatusWithControl_EUAUD" data-testid="micro-off-icon" aria-hidden="true" width="16" height="16" viewBox="0 0 16 16"><path fill="currentColor" d="M0 0h1v1H0z"></path></svg></div></div></div><div class="container_ipiWm participantStatuses"></div></div></div></div><div class="item_NZ2DW newGridItem_X3tXt itemDevices_0il2o" style="transform: translate(636px, 5px); width: 560px; height: 315px;"><div style="position: relative; width: 100%; height: 100%;"><video playsinline="" x-yandex-pip="false" data-g_track_id="00000000-0000-4000-8000-000000000002" data-g_track_muted="true" data-g_track_enabled="true" data-g_track_state="live" style="width: 100%; max-width: 100%; height: 100%;"></video><div class="root_ypmDo rootTeleMessenger_wJjaB"><div class="avatarWithNameBlock_AOhPP"><div class="root_uWsTl" data-testid="participant-video-placeholder"><div class="AvatarBlock_dvP2b"></div></div><div class="NameWrapper_m54f1 participantName_tl1zI"><div class="Name_87gi-"><span class="TextName_BOaIg" title="Test Bot">Test Bot</span></div></div></div><div class="container_ipiWm participantStatuses"></div></div></div></div><div class="item_NZ2DW newGridItem_X3tXt itemDevices_0il2o" style="transform: translate(68px, 328px); width: 560px; height: 315px;"><div style="position: relative; width: 100%; height: 100%;"><video playsinline="" x-yandex-pip="false" data-g_track_id="" data-g_track_muted="" data-g_track_enabled="" data-g_track_state="" style="width: 100%; max-width: 100%; height: 100%;"></video><div class="root_ypmDo rootTeleMessenger_wJjaB rootWithoutVideo_f+Phk rootStroke_Kb2PJ"><div class="avatarWithNameBlock_AOhPP"><div class="root_uWsTl" data-testid="participant-video-placeholder"><div class="AvatarBlock_dvP2b"><div class="Avatar_++7Dj"><div class="ParticipantIcon_j7Luc" style="width: 100%; height: 100%; aspect-ratio: 1 / 1; background-color: rgb(120, 120, 120);"></div></div></div></div><div class="NameWrapper_m54f1 participantName_tl1zI"><div class="Name_87gi-"><span class="TextName_BOaIg" title="Alice Example">Alice Example</span></div></div></div><div class="container_ipiWm participantStatuses"></div></div></div></div><div class="item_NZ2DW newGridItem_X3tXt itemDevices_0il2o" style="transform: translate(636px, 328px); width: 560px; height: 315px;"><div style="position: relative; width: 100%; height: 100%;"><video playsinline="" x-yandex-pip="false" data-g_track_id="" data-g_track_muted="" data-g_track_enabled="" data-g_track_state="" style="width: 100%; max-width: 100%; height: 100%;"></video><div class="root_ypmDo rootTeleMessenger_wJjaB rootWithoutVideo_f+Phk rootStroke_Kb2PJ"><div class="avatarWithNameBlock_AOhPP"><div class="root_uWsTl" data-testid="participant-video-placeholder"><div class="AvatarBlock_dvP2b"><div class="Avatar_++7Dj"><div class="Placeholder_image_KUyHl ParticipantIcon_j7Luc" style="width: 100%; height: 100%; aspect-ratio: 1 / 1; background-color: rgb(157, 201, 67); color: rgb(0, 0, 0); font-size: 72px;"><div class="Container_QYfi9" style="color: rgb(0, 0, 0);"><svg width="184" height="184" viewBox="0 0 184 184" fill="none" xmlns="http://www.w3.org/2000/svg"><path fill-opacity="0.8" fill="currentColor" d="M0 0h1v1H0z"></path></svg></div></div></div></div></div><div class="NameWrapper_m54f1 participantName_tl1zI"><div class="Name_87gi-"><span class="TextName_BOaIg" title="Гость">Гость</span></div></div></div><div class="container_ipiWm participantStatuses"></div></div></div></div></div></div>
+<div class="toolbar">
+  <button type="button" data-testid="participants-button" aria-label="Участники">Участники 4</button>
+  <button type="button" data-testid="chat-alt-button" aria-label="Чат">Чат</button>
+  <button type="button" data-testid="end-call-alt-button" aria-label="Выйти из встречи">x</button>
+</div>
+</body></html>

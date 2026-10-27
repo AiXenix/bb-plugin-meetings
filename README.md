@@ -29,6 +29,7 @@ Screenshots show a demo meeting played by the plugin's built-in mock meeting (th
 - **Join from a link.** Ask an agent ("Запиши встречу https://zoom.us/j/…"), run `bb meetings join`, or paste the link on the **Встречи** page. You can also give a start time. Within about a minute the agent reports whether the bot got in, is waiting to be admitted, or failed and why.
 - **Live transcript.** GigaAM v3 transcribes the audio during the meeting. The final transcript is usually ready 1–3 minutes after the bot leaves.
 - **Speakers by name.** The bot uses Zoom's own active-speaker state, the highlighted video tile and per-participant WebRTC audio tracks. Voice embeddings (TitaNet) fill the gaps. You can rename any speaker.
+- **Deaf-bot guard.** If the meeting shows people speaking but the bot records silence (the platform did not deliver the audio), or the participants' audio reaches the bot but not the recording, the bot notices within about 45 seconds and fixes it by itself: it rejoins the meeting audio, then reloads the meeting page and joins again, while the recording keeps running. If that does not help, the Meetings page shows «Бот не слышит участников встречи» (or «Бот слышит участников, но звук не попадает в запись») with what was tried, and the agent thread that started the recording gets one message.
 - **Live view and remote control.** Watch the bot's browser from the page, and click or type into it to solve a captcha or an unexpected dialog.
 - **Browser account sign-in.** Connect separate Zoom, Google and Yandex profiles for meetings that require authentication. Each call uses its own profile copy.
 - **Google Calendar auto-join (OAuth).** Connect your Google account on the Meetings page with your own OAuth client, and pick the calendars to watch. The bot then joins every event that has a supported meeting link, a minute before it starts, and leaves when the call ends. Any other calendar works through its secret iCal (ICS) address.
@@ -239,7 +240,7 @@ Edit them on the Meetings plugin's settings page in bb, or with `bb plugin confi
 
 - **The bot does not get in.** Read the status on the page and open the live view. Then check `bb meetings logs <id>` and `bb meetings screenshot <id>`.
 - **The transcript waits for GigaAM.** Run `bb gigaam status`, and `bb gigaam restart` if the server is down. The transcriber resumes by itself.
-- **The recording is silent.** Run `bb meetings doctor` (PulseAudio) and `bb meetings selftest`.
+- **The recording is silent.** Run `bb meetings doctor` (PulseAudio) and `bb meetings selftest`. If the page warned «Бот не слышит участников встречи», the platform did not send the bot any audio («Бот слышит участников, но звук не попадает в запись»: it did, but the audio did not reach the recording); `bb meetings logs <id>` shows what the bot tried (lines starting with `Deaf bot`).
 - **Speakers show as "Неизвестный" or "Спикер N".** Zoom showed no active speaker, for example during screen sharing. Rename the speakers. If it happens in every meeting, run `bb meetings debug-dump <id>` during a meeting and look at the `debug/` folder.
 - **Plugin logs.** `bb plugin logs meetings -n 200`.
 

@@ -105,6 +105,11 @@ export const meetingSummarySchema = z
     screenshotVersion: z.number().nullable(),
     hasSummary: z.boolean(),
     requestedByThreadId: z.string().nullable(),
+    /**
+     * Russian warning to show prominently while it is set, e.g. the deaf-bot guard's
+     * "Бот не слышит участников встречи…" (state.json audioIssue, DESIGN §6.8). null/absent = none.
+     */
+    warning: z.string().nullable().optional(),
   })
   .strict();
 export type MeetingSummary = z.infer<typeof meetingSummarySchema>;

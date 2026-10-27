@@ -46,7 +46,9 @@ async function guard(run: () => Promise<PluginAgentToolResult>): Promise<PluginA
 
 function shortLine(row: MeetingRow): string {
   const when = row.status === "scheduled" ? row.scheduledAt : (row.startedAt ?? row.createdAt);
-  return `${row.id} | ${row.status} | ${isoMinute(when)} | ${row.durationSec > 0 ? clock(row.durationSec) : "-"} | ${row.title}`;
+  // The deaf-bot warning's first sentence (Russian): agents should pass it on.
+  const warning = row.warning !== null && row.status === "recording" ? ` | WARNING: ${row.warning.split(/(?<=[.!?])\s+/)[0]}` : "";
+  return `${row.id} | ${row.status} | ${isoMinute(when)} | ${row.durationSec > 0 ? clock(row.durationSec) : "-"} | ${row.title}${warning}`;
 }
 
 /** One page of transcript text, cut at a segment boundary under `maxChars`. */

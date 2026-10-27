@@ -126,6 +126,8 @@ export function describeMeetingEn(row: MeetingRow): string {
     lines.push(`Error:        ${row.errorCode}: ${explainError(row.errorCode, "en")}`);
     if (row.errorMessage) lines.push(`              ${row.errorMessage}`);
   }
+  // The deaf-bot guard's warning (Russian, DESIGN §6.8): shown as is, the user reads it.
+  if (row.warning !== null) lines.push(`Warning:      ${row.warning}`);
   lines.push(`Summary:      ${row.summaryMd ? "saved" : "none"}`);
   return maskMeetingUrl(lines.join("\n"));
 }

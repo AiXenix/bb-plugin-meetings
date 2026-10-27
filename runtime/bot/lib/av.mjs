@@ -413,8 +413,9 @@ export class Recorder {
 }
 
 /**
- * Reads what was appended to audio.pcm since the last call and returns its
- * RMS (0..1). Used for the "no audio at all" timeout.
+ * Reads what was appended to audio.pcm since the last call and measures it:
+ * RMS for the "no audio at all" timeout, peak for the deaf-bot guard
+ * (lib/deaf-guard.mjs). At most the newest `maxBytes` are read per call.
  */
 export class PcmTail {
   constructor(pcmPath) {
@@ -422,36 +423,52 @@ export class PcmTail {
     this.offset = 0;
   }
 
-  /** RMS of the new audio, or null when nothing new was written. */
-  readRms(maxBytes = 2 * PCM_BYTES_PER_SEC) {
+  /** {rms, peak, seconds} of the new audio (0..1), or null when nothing new was written. */
+  read(maxBytes = 2 * PCM_BYTES_PER_SEC) {
     let fd;
     try {
       const size = fs.statSync(this.pcmPath).size;
       if (size <= this.offset) return null;
-      const start = Math.max(this.offset, size - maxBytes);
+      // Skip whole samples only: an odd skip (a size seen mid-write) would misalign every later read.
+      const skip = Math.max(0, size - this.offset - maxBytes);
+      const start = this.offset + skip + (skip & 1);
       const length = (size - start) & ~1;
       if (length <= 0) return null;
       fd = fs.openSync(this.pcmPath, "r");
       const buffer = Buffer.alloc(length);
       fs.readSync(fd, buffer, 0, length, start);
       this.offset = start + length;
-      return rmsS16le(buffer);
+      return { ...measureS16le(buffer), seconds: length / PCM_BYTES_PER_SEC };
     } catch {
       return null;
     } finally {
       if (fd !== undefined) fs.closeSync(fd);
     }
   }
+
+  /** RMS of the new audio, or null when nothing new was written. */
+  readRms(maxBytes = 2 * PCM_BYTES_PER_SEC) {
+    return this.read(maxBytes)?.rms ?? null;
+  }
+}
+
+/** RMS and peak |sample| of s16le samples, normalised to 0..1. */
+export function measureS16le(buffer) {
+  const samples = Math.floor(buffer.length / 2);
+  if (samples === 0) return { rms: 0, peak: 0 };
+  let sum = 0;
+  let peak = 0;
+  for (let i = 0; i < samples; i += 1) {
+    const raw = buffer.readInt16LE(i * 2);
+    const v = raw / 32768;
+    sum += v * v;
+    const abs = raw < 0 ? -raw : raw;
+    if (abs > peak) peak = abs;
+  }
+  return { rms: Math.sqrt(sum / samples), peak: Math.min(1, peak / 32767) };
 }
 
 /** RMS of s16le samples, normalised to 0..1. */
 export function rmsS16le(buffer) {
-  const samples = Math.floor(buffer.length / 2);
-  if (samples === 0) return 0;
-  let sum = 0;
-  for (let i = 0; i < samples; i += 1) {
-    const v = buffer.readInt16LE(i * 2) / 32768;
-    sum += v * v;
-  }
-  return Math.sqrt(sum / samples);
+  return measureS16le(buffer).rms;
 }

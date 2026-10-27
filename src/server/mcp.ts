@@ -11,7 +11,7 @@ export const AGENT_HTTP_BODY_BYTES = 512 * 1024;
 export const AGENT_HTTP_RESULT_BYTES = 1024 * 1024;
 export const MCP_PROTOCOL_VERSIONS = ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"] as const;
 const MODERN_PROTOCOL = MCP_PROTOCOL_VERSIONS[0];
-const SERVER_INFO = { name: "AiXenix Meetings", version: "0.3.0", websiteUrl: "https://aixenix.com" };
+const SERVER_INFO = { name: "AiXenix Meetings", version: "0.3.1", websiteUrl: "https://aixenix.com" };
 const MCP_INSTRUCTIONS = "Record and inspect authorized meetings. Preserve invite links when joining, never repeat passcodes. Read every transcript page before summarizing. Delete only on the user's explicit request. AI answers must remain grounded in the transcript.";
 const rpcMessageSchema = z.object({
   jsonrpc: z.literal("2.0"),

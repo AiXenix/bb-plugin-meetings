@@ -439,6 +439,71 @@ describe("reconcile", () => {
     expect(await service.tick()).toBe(15_000);
   });
 
+  it("shows the deaf-bot warning while recording and warns the thread once, only after the bot's own recovery failed", async () => {
+    let clock = T0;
+    const { harness, service, fake } = await load({ now: () => clock });
+    const result = await harness.behavior.runCli(["join", ZOOM_URL, "--title", "Планёрка", "--json"], { threadId: "thr_deaf" });
+    const id = (JSON.parse(result.stdout) as { meeting: Summary }).meeting.id;
+    const runtime = fake.get(id);
+    runtime.audio = Buffer.alloc(5000);
+    const recording = { phase: "in_meeting" as const, joinedAt: T0 + 1000, recordingStartedAt: T0 + 2000, participants: { count: 4, names: ["Анна", "Борис", "Вера"] }, audio: { seconds: 300, bytes: 5000 } };
+    const sends = () => harness.inspection.sdk.callsTo("threads.send") as Array<[{ threadId: string; input: Array<{ text: string }> }]>;
+
+    fake.setBot(id, { ...recording, audioIssue: null });
+    await service.tick();
+    expect((await get(harness, id)) as Summary & { warning?: string | null }).toMatchObject({ status: "recording", warning: null });
+
+    // Recovering (escalated false): visible, no message yet.
+    const recovering = "Бот не слышит участников встречи: участники говорят, а в записи тишина. Пробую восстановить звук: переподключаю звук встречи (попытка 1).";
+    fake.setBot(id, { ...recording, audioIssue: { since: T0 + 5000, attempts: 1, lastAction: "rejoin_audio", message: recovering, escalated: false } });
+    await service.tick();
+    expect(((await get(harness, id)) as Summary & { warning?: string | null }).warning).toBe(recovering);
+    expect(harness.inspection.realtimeSignals).toContainEqual({ channel: "meetings.changed", payload: { id } });
+    expect(sends()).toHaveLength(0);
+
+    // The ladder is exhausted: one message to the requesting thread, however many polls follow.
+    const warning = "Бот не слышит участников встречи: участники говорят, а в записи тишина. Автоматически пробовали: переподключить звук встречи (2 раза), перезагрузить страницу встречи (1 раз) — звук не появился.";
+    fake.setBot(id, { ...recording, audioIssue: { since: T0 + 5000, attempts: 3, lastAction: "reload", message: warning, escalated: true } });
+    await service.tick();
+    await service.tick();
+    clock += 200_000;
+    fake.setBot(id, { ...recording, audioIssue: { since: T0 + 5000, attempts: 4, lastAction: "rejoin_audio", message: warning, escalated: true } });
+    await service.tick();
+    expect(sends()).toHaveLength(1);
+    const [message] = sends()[0]!;
+    expect(message.threadId).toBe("thr_deaf");
+    expect(message.input[0]!.text).toContain(`Встреча «Планёрка» (${id}) идёт, но с записью проблема.`);
+    expect(message.input[0]!.text).toContain(warning);
+    expect(message.input[0]!.text).toContain(`bb meetings stop ${id}`);
+
+    // Surfaces: CLI show (text + json) and the agent api.
+    const show = await harness.behavior.runCli(["show", id]);
+    expect(show.stdout).toContain(`Warning:      ${warning}`);
+    const showJson = JSON.parse((await harness.behavior.runCli(["show", id, "--json"])).stdout) as { meeting: { warning: string | null } };
+    expect(showJson.meeting.warning).toBe(warning);
+    const api = await harness.behavior.runCli(["api", "--request", JSON.stringify({ action: "show", id }), "--json"]);
+    expect((JSON.parse(api.stdout) as { meeting: { warning: string | null } }).meeting.warning).toBe(warning);
+
+    // Sound is back: the warning clears; a later episode does not message again.
+    fake.setBot(id, { ...recording, audioIssue: null });
+    await service.tick();
+    expect(((await get(harness, id)) as Summary & { warning?: string | null }).warning).toBeNull();
+    fake.setBot(id, { ...recording, audioIssue: { since: clock, attempts: 3, lastAction: "reload", message: warning, escalated: true } });
+    await service.tick();
+    expect(sends()).toHaveLength(1);
+
+    // The meeting ends while deaf: the final message carries the warning.
+    const past = "Бот не слышал участников встречи до конца записи: участники говорили, а в записи была тишина.";
+    fake.setBot(id, { ...recording, phase: "ended", endReason: "meeting_ended", endedAt: clock, audioIssue: { since: clock, attempts: 3, lastAction: "reload", message: past, escalated: true } }, false);
+    runtime.final = true;
+    runtime.transcriber = transcriberState({ phase: "done", processedSec: 300, audioSec: 300 });
+    await service.tick();
+    const done = (await get(harness, id)) as Summary & { warning?: string | null };
+    expect(done).toMatchObject({ status: "done", warning: past });
+    expect(sends()).toHaveLength(2);
+    expect(sends()[1]![0].input[0]!.text).toContain(`Внимание: ${past}`);
+  });
+
   it("notifies failures with the Russian explanation, unless disabled", async () => {
     const { harness, service, fake } = await load();
     const result = await harness.behavior.runCli(["join", ZOOM_URL, "--json"], { threadId: "thr_7" });

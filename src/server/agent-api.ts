@@ -160,6 +160,8 @@ export function agentMeeting(service: MeetingsService, row: MeetingRow) {
           },
     endReason: row.endReason,
     hasSummary: row.summaryMd !== null && row.summaryMd.trim() !== "",
+    /** Russian warning to pass on to the user, e.g. "Бот не слышит участников встречи…" (deaf-bot guard); null = none. */
+    warning: row.warning === null ? null : maskMeetingUrl(row.warning),
   };
 }
 

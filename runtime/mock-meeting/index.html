@@ -57,6 +57,20 @@
               <button type="button" id="audio-button" class="footer-button-base__button ax-outline join-audio-container__btn" aria-label="audio">
                 <span class="footer-button-base__button-label">Audio</span>
               </button>
+              <div id="audioOptionMenu" class="audio-option-menu dropup">
+                <div role="group" aria-expanded="false" class="dropdown-toggle btn-group">
+                  <button type="button" id="audio-menu-toggle" class="footer-button-base__button ax-outline footer-sub-toggle-base" aria-label="More audio controls">
+                    <span class="footer-button-base__button-label">^</span>
+                  </button>
+                </div>
+                <ul id="audio-menu" class="dropdown-menu audio-option-menu__pop-menu" role="menu" hidden>
+                  <li class="dropdown-header">Select a Speaker</li>
+                  <li role="presentation"><a role="menuitem" href="#" data-speaker="default" aria-label="Select a speaker Same as System">Same as System</a></li>
+                  <li role="presentation"><a role="menuitem" href="#" data-speaker="mock-speaker-2" aria-label="Select a speaker Mock Speaker 2">Mock Speaker 2</a></li>
+                  <li role="separator" class="divider"></li>
+                  <li role="presentation"><a role="menuitem" href="#" id="leave-computer-audio">Leave Computer Audio</a></li>
+                </ul>
+              </div>
               <button type="button" id="video-button" class="footer-button-base__button ax-outline send-video-container__btn" aria-label="Start Video">
                 <svg class="SvgVideoOff" width="1" height="1" aria-hidden="true"></svg>
                 <span class="footer-button-base__button-label">Start Video</span>

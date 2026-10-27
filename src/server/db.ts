@@ -110,6 +110,10 @@ export const MIGRATIONS: readonly string[] = [
     last_error TEXT,
     updated_at INTEGER NOT NULL
   )`,
+  // Deaf-bot guard (DESIGN §6.8): the bot's Russian warning while it persists, and the
+  // one-time "the bot cannot hear the meeting" message to the requesting thread.
+  `ALTER TABLE meetings ADD COLUMN warning TEXT`,
+  `ALTER TABLE meetings ADD COLUMN warning_notified_at INTEGER`,
 ];
 
 export function openDatabase(bb: BbPluginApi): Db {
@@ -194,6 +198,10 @@ export interface MeetingRow {
   notify: boolean;
   notifiedAt: number | null;
   calendarKey: string | null;
+  /** Russian warning from the bot while it lasts (state.json audioIssue.message), null = none. */
+  warning: string | null;
+  /** When the requesting thread got the one-time deaf-bot warning; null = not yet. */
+  warningNotifiedAt: number | null;
   updatedAt: number;
 }
 
@@ -237,6 +245,8 @@ interface RawMeetingRow {
   notify: number;
   notified_at: number | null;
   calendar_key: string | null;
+  warning: string | null;
+  warning_notified_at: number | null;
   updated_at: number;
 }
 
@@ -280,6 +290,8 @@ const COLUMNS = {
   notify: "notify",
   notifiedAt: "notified_at",
   calendarKey: "calendar_key",
+  warning: "warning",
+  warningNotifiedAt: "warning_notified_at",
   updatedAt: "updated_at",
 } as const satisfies Record<Exclude<keyof MeetingRow, "id">, string>;
 
@@ -335,6 +347,8 @@ function fromRaw(raw: RawMeetingRow): MeetingRow {
     notify: raw.notify === 1,
     notifiedAt: raw.notified_at,
     calendarKey: raw.calendar_key,
+    warning: raw.warning ?? null,
+    warningNotifiedAt: raw.warning_notified_at ?? null,
     updatedAt: raw.updated_at,
   };
 }
@@ -644,6 +658,13 @@ export class Repository {
       .prepare("SELECT * FROM meetings WHERE calendar_key = ? ORDER BY created_at DESC LIMIT 1")
       .get(key) as RawMeetingRow | undefined;
     return raw === undefined ? null : fromRaw(raw);
+  }
+
+  /** Claim the one-time deaf-bot warning message (DESIGN §6.8); true when this caller won it. */
+  claimWarningNotification(id: string, now = Date.now()): boolean {
+    return this.db
+      .prepare("UPDATE meetings SET warning_notified_at = ? WHERE id = ? AND warning_notified_at IS NULL")
+      .run(now, id).changes === 1;
   }
 
   /** Claim the one-time notification; true when this caller won it. */

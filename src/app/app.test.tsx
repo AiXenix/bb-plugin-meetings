@@ -725,6 +725,49 @@ describe("failed meeting", () => {
   });
 });
 
+describe("deaf-bot warning", () => {
+  const WARNING =
+    "Бот не слышит участников встречи: участники говорят, а в записи тишина. Автоматически пробовали: переподключить звук встречи (2 раза), перезагрузить страницу встречи (1 раз) — звук не появился.";
+  const HEAD = "Бот не слышит участников встречи: участники говорят, а в записи тишина.";
+  const BODY = "Автоматически пробовали: переподключить звук встречи (2 раза), перезагрузить страницу встречи (1 раз) — звук не появился.";
+
+  it("shows the bot's warning on the live card while it records", async () => {
+    const live = summary("mtg_deaf01", { title: "Планёрка без звука", status: "recording", endReason: null, endedAt: null, transcriptStatus: "live", warning: WARNING });
+    const quiet = summary("mtg_okay01", { title: "Обычная встреча", status: "recording", endReason: null, endedAt: null, transcriptStatus: "live", warning: null });
+    const rpc = baseHandlers({
+      "meetings.list": (input: { filter: string }) => ({ meetings: input.filter === "active" ? [live, quiet] : [], nextBefore: null }),
+    });
+    const slot = await renderPage("", rpc);
+    const card = await screen.findByRole("article", { name: "Планёрка без звука" });
+    const alert = within(card).getByRole("alert");
+    expect(within(alert).getByText(HEAD)).toBeTruthy();
+    expect(within(alert).getByText(BODY)).toBeTruthy();
+    expect(within(screen.getByRole("article", { name: "Обычная встреча" })).queryByRole("alert")).toBeNull();
+    slot.lifecycle.unmount();
+  });
+
+  it("shows it on the detail page, and not once it is cleared", async () => {
+    let meeting = detail("mtg_deaf01", { title: "Планёрка без звука", status: "recording", endReason: null, endedAt: null, transcriptStatus: "live", warning: WARNING });
+    const rpc = baseHandlers({
+      "meetings.get": () => ({ meeting }),
+      "meetings.segments": () => ({ segments: [], final: false, lastId: -1, total: 0 }),
+      "meetings.liveView": () => ({ view: null }),
+    });
+    const slot = await renderPage("mtg_deaf01", rpc);
+    const alert = (await screen.findAllByRole("alert")).find((el) => el.textContent?.includes(HEAD));
+    expect(alert).toBeTruthy();
+    expect(within(alert!).getByText(BODY)).toBeTruthy();
+    slot.lifecycle.unmount();
+    cleanup();
+
+    meeting = { ...meeting, warning: null };
+    const again = await renderPage("mtg_deaf01", rpc);
+    expect(await screen.findByRole("heading", { level: 1, name: "Планёрка без звука" })).toBeTruthy();
+    expect(screen.queryByText(HEAD)).toBeNull();
+    again.lifecycle.unmount();
+  });
+});
+
 describe("retrying a meeting", () => {
   it("offers no rejoin for a failed import and schedules a cancelled future meeting again", async () => {
     const failedImport = detail("mtg_imp001", {

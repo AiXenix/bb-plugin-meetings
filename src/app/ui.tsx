@@ -105,6 +105,26 @@ export function Notice({
   );
 }
 
+/** "Title sentence. Rest…" → {title, body}: a long Russian warning becomes a Notice title plus text. */
+export function splitWarning(text: string): { title: string; body: string } {
+  const [title = text, ...rest] = text.trim().split(/(?<=[.!?])\s+/);
+  return { title, body: rest.join(" ") };
+}
+
+/**
+ * The bot's warning (MeetingSummary.warning, e.g. the deaf-bot guard's
+ * "Бот не слышит участников встречи…", DESIGN §6.8), prominent and announced.
+ */
+export function MeetingWarning({ warning, compact = false, className }: { warning: string | null | undefined; compact?: boolean; className?: string }) {
+  if (warning === null || warning === undefined || warning.trim() === "") return null;
+  const { title, body } = splitWarning(warning);
+  return (
+    <Notice tone="warning" role="alert" title={title} className={cn(compact ? "px-2.5 py-2 text-xs" : null, className)}>
+      {body === "" ? null : <p className={cn("break-words text-muted-foreground", compact ? "text-xs" : "text-sm")}>{body}</p>}
+    </Notice>
+  );
+}
+
 /** A page section with a heading, an optional counter and actions on the right. */
 export function Section({
   title,

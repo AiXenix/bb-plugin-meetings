@@ -3,7 +3,7 @@
 // (docs/dev/DESIGN.md §6.3): real Chrome on Xvfb, real PulseAudio + ffmpeg,
 // the Zoom adapter's join/sample/chat/leave code, speaker fusion.
 //
-// Usage: node scripts/e2e-bot-mock.mjs [profile|default|avatar|avatar-start|fixture|alone|stop|sigterm|all] [--keep]
+// Usage: node scripts/e2e-bot-mock.mjs [profile|default|avatar|avatar-start|fixture|alone|stop|sigterm|deaf-rejoin|deaf-reload|deaf-forever|deaf-silent|deaf-capture|all] [--keep]
 //   profile  copied signed-in profile; the bot is host (its Leave popover offers "End Meeting for All")
 //   avatar   the avatar as the camera (host-rendered MJPEG, fake devices): it plays in the bot's tile, audio still recorded
 //   avatar-start  the camera starts off in the preview and again after entering: the bot turns it on both times
@@ -12,6 +12,14 @@
 //   alone    everyone leaves; the bot leaves after aloneTimeoutSec
 //   stop     stop.request + debug.request + remote control while recording
 //   sigterm  Zoom drops computer audio mid-meeting, then SIGTERM (what the host sends on stop)
+//   deaf-rejoin   indicators work but no audio reaches the bot until it leaves and rejoins computer audio
+//   deaf-reload   ...until it reloads the meeting page and joins again (the recording keeps running)
+//   deaf-forever  ...never: the warning (audioIssue, escalated) shows while recording, retries continue
+//   deaf-silent   no false positive: a silent meeting, then a sticky indicator (screen share) over silence
+//   deaf-capture  the participants' tracks carry sound but the page plays none of it (capture mode) until the
+//                 bot leaves and rejoins computer audio; only the recording counts as recovered
+// Every scenario runs the deaf-bot guard with short timings (E2E_DEAF_GUARD) and, unless it is a deaf
+// scenario, checks that it never fired.
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
@@ -24,6 +32,9 @@ const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", "
 const BOT_NAME = "Notetaker E2E";
 const EVIDENCE = path.join(E2E, "evidence", "avatar");
 const ANNOUNCEMENT = "Привет! Я записываю встречу (тест).";
+/** Deaf-bot guard timings for the mock (speakerSelectors.deafGuard): a 10 s window instead of 45 s. */
+const E2E_DEAF_GUARD = { windowMs: 10_000, minSpeakingMs: 4_000, minChanges: 2, captureSoundMs: 4_000, retryMs: 8_000, persistentRetryMs: 20_000, recoverySpanMs: 3_000, recoveryWindowMs: 12_000 };
+const DEAF_ACTION = /^Deaf bot: (participants speak|still no meeting audio|the participants' audio)/;
 
 // ------------------------------------------------------------------ server
 
@@ -161,13 +172,22 @@ async function runScenario(name, { port, events }, options) {
     chatAnnouncement: options.chat ?? "",
     zoomProfileDir: options.zoomProfileDir ?? null,
     avatarVideo: options.avatar ? await prepareAvatar("test", BOT_NAME) : null,
+    speakerSelectors: { deafGuard: E2E_DEAF_GUARD },
   });
   const short = config.meetingId.slice(4, 16);
   console.log(`  dir ${dir}\n  url ${url}`);
   events.length = 0;
   const started = Date.now();
   const bot = runBot(dir, { echo: process.env.E2E_ECHO === "1" });
-  if (options.during) await options.during({ dir, checks, bot, events });
+  // Every distinct state.json audioIssue seen while the bot runs (the deaf-bot warning).
+  const issues = [];
+  const issuePoll = setInterval(() => {
+    const st = readJsonSafe(path.join(dir, "state.json"));
+    if (st === null) return;
+    const key = JSON.stringify(st.audioIssue ?? null);
+    if (issues.at(-1)?.key !== key) issues.push({ t: Date.now(), phase: st.phase, issue: st.audioIssue ?? null, key });
+  }, 300);
+  if (options.during) await options.during({ dir, checks, bot, events, issues });
   const timeout = setTimeout(() => {
     console.log("  timeout: killing the bot");
     try {
@@ -176,6 +196,7 @@ async function runScenario(name, { port, events }, options) {
   }, (options.timeoutSec ?? 240) * 1000);
   const { code } = await bot.exited;
   clearTimeout(timeout);
+  clearInterval(issuePoll);
   console.log(`  bot exited with ${code} after ${Math.round((Date.now() - started) / 1000)} s`);
   await new Promise((resolve) => setTimeout(resolve, 500));
 
@@ -213,7 +234,14 @@ async function runScenario(name, { port, events }, options) {
   }
 
   // ---- mock-side events
-  const utterances = events.filter((e) => e.type === "utterance").sort((a, b) => a.start - b.start);
+  // Deaf scenarios: only what was played after the bot could hear again, and after its recovery step
+  // finished (the sampler pauses during one), is checked as audio and speakers.
+  const deafOff = events.filter((e) => (e.type === "deaf" || e.type === "capture") && e.on === false).at(-1)?.t ?? Infinity;
+  const recoveryDone = log.filter((e) => /^Deaf bot: .* (done|did not work)$/.test(e.msg)).map((e) => e.t).filter((t) => t <= deafOff + 120_000);
+  const audibleFrom = options.deaf ? Math.max(deafOff, ...recoveryDone.filter((t) => t >= deafOff - 60_000)) : -Infinity;
+  const allUtterances = events.filter((e) => e.type === "utterance").sort((a, b) => a.start - b.start);
+  const utterances = allUtterances.filter((u) => u.start >= audibleFrom + 300);
+  if (options.deaf) console.log(`  audible from ${Number.isFinite(audibleFrom) ? new Date(audibleFrom).toISOString() : "never"}: ${utterances.length} of ${allUtterances.length} utterances`);
   const mode = events.find((e) => e.type === "audio-mode")?.mode ?? null;
   console.log(`  mock audio mode: ${mode}; utterances: ${utterances.length}; mic: ${JSON.stringify(events.find((e) => e.type === "mic") ?? null)}`);
   checks.ok(events.some((e) => e.type === "joined" && e.name === BOT_NAME), "bot typed its name and joined", events.find((e) => e.type === "joined"));
@@ -287,6 +315,11 @@ async function runScenario(name, { port, events }, options) {
   const spanSec = signals.length > 1 ? (signals.at(-1).t - signals[0].t) / 1000 : 0;
   checks.ok(signals.length > 0 && signals.length <= spanSec + 2, "signals.jsonl written at ≤ 1 line/s", { lines: signals.length, spanSec });
   checks.ok(fs.existsSync(path.join(dir, "screen.jpg")) && fs.readFileSync(path.join(dir, "screen.jpg")).subarray(0, 2).toString("hex") === "ffd8", "screen.jpg is a JPEG");
+  // ---- deaf-bot guard: never fires in a meeting the bot hears
+  if (!options.deaf) {
+    checks.ok(!log.some((e) => DEAF_ACTION.test(e.msg)), "deaf-bot guard: no false positive", log.filter((e) => /^Deaf /.test(e.msg)).map((e) => e.msg));
+    checks.ok(issues.every((i) => i.issue === null) && (state?.audioIssue ?? null) === null, "state.json audioIssue stayed null", issues.map((i) => i.issue));
+  }
   const debugFiles = fs.existsSync(path.join(dir, "debug")) ? fs.readdirSync(path.join(dir, "debug")) : [];
   checks.ok(debugFiles.some((f) => /joined\.json$/.test(f)), "debug dump at join", debugFiles.length);
   const joinedDump = debugFiles.find((f) => /joined\.json$/.test(f));
@@ -307,7 +340,7 @@ async function runScenario(name, { port, events }, options) {
   const display = log.map((e) => /^Xvfb ready on (:\d+)/.exec(e.msg)?.[1]).find(Boolean);
   const xvfbAfter = display ? xvfbDisplays().filter((line) => line.includes(`Xvfb ${display} `)) : ["display not logged"];
   checks.ok(xvfbAfter.length === 0, `the bot's Xvfb ${display ?? "?"} is gone`, xvfbAfter);
-  if (options.after) await options.after({ dir, checks, state, log, events });
+  if (options.after) await options.after({ dir, checks, state, log, events, issues, utterances, allUtterances });
   return checks;
 }
 
@@ -387,6 +420,44 @@ function avatarAfter({ log, checks, events }) {
   checks.ok(log.some((e) => /^Zoom plays the meeting to the default output/.test(e.msg)), "the bot checked that the meeting plays to the recorded (default) output");
   const mic = events.find((e) => e.type === "mic");
   checks.ok(/fake/i.test(mic?.label ?? ""), "the page's microphone is Chrome's fake (silent) device", mic);
+}
+
+// ------------------------------------------------------------------ deaf-bot guard
+
+/**
+ * No meeting audio in a deaf mock recording: WebRTC comfort noise sits around -84 dBFS and the page
+ * reload clicks once at about -75 dBFS for 5 ms; the mock's speech tones peak near -8 dBFS.
+ */
+const NO_SPEECH_PEAK = 33; // -60 dBFS
+
+/** Max |sample| of audio.pcm (s16le). */
+function pcmPeak(file) {
+  const buffer = fs.readFileSync(file);
+  let peak = 0;
+  for (let i = 0; i + 1 < buffer.length; i += 2) peak = Math.max(peak, Math.abs(buffer.readInt16LE(i)));
+  return peak;
+}
+
+const index = (log, pattern, from = 0) => log.findIndex((e, i) => i >= from && pattern.test(e.msg));
+
+/** Common checks of a deaf scenario: detection with real evidence, decisions logged, the recording never interrupted. */
+function deafCommon({ dir, log, checks, events }) {
+  const detected = log.find((e) => /^Deaf bot: participants speak, but the recording is digital silence/.test(e.msg));
+  checks.ok(detected?.level === "warn", "deaf bot detected (warn in events.jsonl)", detected ?? null);
+  checks.ok(
+    detected && detected.data.changes >= E2E_DEAF_GUARD.minChanges && detected.data.speakingSec * 1000 >= E2E_DEAF_GUARD.minSpeakingMs && (detected.data.peakDbfs ?? -Infinity) < -80 && detected.data.trackMax === 0,
+    "detection evidence: speakers changing, digital silence, silent WebRTC tracks",
+    detected?.data,
+  );
+  checks.ok(fs.readdirSync(path.join(dir, "debug")).some((f) => /-deaf\.json$/.test(f)), "debug dump at detection");
+  const firstDeaf = events.find((e) => e.type === "deaf" && e.on === true);
+  checks.ok(firstDeaf !== undefined, "the mock really was deaf", events.filter((e) => e.type === "deaf"));
+  const endAt = events.filter((e) => e.type === "end").at(-1)?.t ?? Infinity;
+  checks.ok(
+    !events.some((e) => e.type === "ended-for-all") && events.filter((e) => e.type === "left").every((e) => e.t >= endAt),
+    "recovery never clicked Leave Meeting / End (the only Leave is after the meeting ended)",
+    events.filter((e) => ["left", "ended-for-all", "end"].includes(e.type)),
+  );
 }
 
 const DEFAULT_NAMES = ["Анна Смирнова", "Борис Петров", "Вера Иванова"];
@@ -519,6 +590,141 @@ const SCENARIOS = {
       checks.ok(off >= 0 && details.slice(off + 1).includes("Recording"), "state.detail flagged the missing computer audio, then went back to Recording");
     },
     expectRoster: { count: 4, names: DEFAULT_NAMES },
+  },
+  "deaf-rejoin": {
+    // Deaf until "More audio controls" → "Leave Computer Audio" → Join Audio; Zoom also plays to a non-default speaker.
+    query: { deaf: "rejoin", loops: "3", speaker: "other" },
+    deaf: true,
+    endReason: "meeting_ended",
+    expectRoster: { count: 4, names: DEFAULT_NAMES },
+    timeoutSec: 300,
+    after: async (ctx) => {
+      const { log, checks, events, issues, state, utterances } = ctx;
+      deafCommon(ctx);
+      const left = events.findIndex((e) => e.type === "audio-left");
+      checks.ok(left >= 0, "the bot pressed Leave Computer Audio in the audio menu");
+      checks.ok(events.some((e, i) => e.type === "audio-joined" && i > left), "then joined computer audio again");
+      checks.ok(events.some((e) => e.type === "speaker-selected" && e.deviceId === "default"), "picked the default speaker (Same as System)");
+      checks.ok(events.some((e) => e.type === "deaf" && e.on === false && /rejoined/.test(e.why)), "the mock delivered audio again after the rejoin");
+      checks.ok(events.filter((e) => e.type === "joined").length === 1, "no page reload was needed");
+      const recovered = index(log, /^Audio recovered after/);
+      checks.ok(recovered > index(log, /^Deaf bot: rejoining the meeting audio done/), "\"Audio recovered\" logged after the rejoin", log.filter((e) => /^(Deaf|Audio recovered)/.test(e.msg)).map((e) => e.msg));
+      checks.ok(issues.some((i) => i.issue && i.issue.escalated === false && /^Бот не слышит участников встречи/.test(i.issue.message)), "state.json showed the issue while recovering", issues.map((i) => i.issue));
+      checks.ok(!issues.some((i) => i.issue?.escalated), "never escalated to the warning");
+      checks.ok(issues.at(-1)?.issue === null && (state?.audioIssue ?? null) === null, "the issue cleared after recovery");
+      checks.ok(utterances.length >= 6, "speech after the recovery was checked in audio.pcm", utterances.length);
+      checks.ok(log.some((e) => e.msg === "Picked the default speaker in Zoom's audio menu: Same as System"), "the speaker choice is logged");
+    },
+  },
+  "deaf-reload": {
+    // Rejoining audio does not help; only a reloaded page (the second load in this tab) hears the meeting.
+    query: { deaf: "reload", loops: "2" },
+    deaf: true,
+    endReason: "meeting_ended",
+    expectRoster: { count: 4, names: DEFAULT_NAMES },
+    timeoutSec: 300,
+    after: async (ctx) => {
+      const { log, checks, events, issues, state, utterances } = ctx;
+      deafCommon(ctx);
+      const steps = log.filter((e) => /^Deaf bot: (participants speak|still no meeting audio)/.test(e.msg)).map((e) => e.data?.action ?? null);
+      checks.ok(JSON.stringify(steps.slice(0, 3)) === JSON.stringify(["rejoin_audio", "rejoin_audio", "reload"]), "ladder: rejoin, rejoin, reload", steps);
+      checks.ok(events.filter((e) => e.type === "audio-left").length >= 2, "both audio rejoins ran in the mock");
+      const joins = events.filter((e) => e.type === "joined");
+      checks.ok(joins.length === 2, "the bot joined the reloaded page through the normal join flow", joins.length);
+      checks.ok(events.some((e) => e.type === "deaf" && e.on === false && e.loads === 2), "the reloaded page delivered audio");
+      checks.ok(log.some((e) => /^Rejoined the meeting after the page reload/.test(e.msg)), "rejoin after the reload logged");
+      checks.ok(index(log, /^Audio recovered after/) > index(log, /^Rejoined the meeting after the page reload/), "\"Audio recovered\" after the reload");
+      checks.ok(state?.joinedAt < joins[1]?.t, "state.joinedAt stays the first join");
+      checks.ok(issues.some((i) => i.issue && /перезагружаю страницу встречи/.test(i.issue.message)), "the issue said the page is being reloaded", issues.map((i) => i.issue?.message));
+      checks.ok(!issues.some((i) => i.issue?.escalated), "never escalated to the warning");
+      checks.ok((state?.audioIssue ?? null) === null, "the issue cleared after recovery");
+      checks.ok(utterances.length >= 6, "speech after the reload was checked in audio.pcm", utterances.length);
+    },
+  },
+  "deaf-forever": {
+    // Nothing helps: the escalated warning shows while the meeting runs, rejoins continue, the final state keeps it.
+    query: { deaf: "forever", loops: "3" },
+    deaf: true,
+    endReason: "meeting_ended",
+    expectRoster: { count: 4, names: DEFAULT_NAMES },
+    timeoutSec: 360,
+    after: async (ctx) => {
+      const { log, checks, events, issues, state, dir } = ctx;
+      deafCommon(ctx);
+      const escalated = issues.find((i) => i.issue?.escalated === true);
+      checks.ok(escalated?.phase === "in_meeting", "the escalated warning appeared while recording", issues.map((i) => [i.phase, i.issue?.escalated]));
+      checks.ok(
+        /^Бот не слышит участников встречи/.test(escalated?.issue?.message ?? "") &&
+          /Автоматически пробовали: переподключить звук встречи \(2 раза\), перезагрузить страницу встречи \(1 раз\)/.test(escalated?.issue?.message ?? ""),
+        "the warning says what was tried",
+        escalated?.issue?.message,
+      );
+      const warn = index(log, /^Deaf bot: still no meeting audio after 3 recovery attempt/);
+      checks.ok(warn >= 0 && log[warn].level === "warn", "warning decision logged");
+      checks.ok(index(log, /^Deaf bot: still no meeting audio; rejoining the meeting audio again/, warn) > warn, "kept rejoining the audio after the warning");
+      checks.ok(!log.some((e) => /^Audio recovered/.test(e.msg)), "never claimed recovery");
+      checks.ok(events.filter((e) => e.type === "joined").length === 2, "one page reload");
+      checks.ok(state?.audioIssue?.escalated === true && /^Бот не слышал участников встречи до конца записи/.test(state.audioIssue.message), "the final state keeps the issue (past tense)", state?.audioIssue);
+      const peak = pcmPeak(path.join(dir, "audio.pcm"));
+      checks.ok(peak <= NO_SPEECH_PEAK, "audio.pcm has no meeting audio, peak below -60 dBFS (the mock never played to the bot)", peak);
+    },
+  },
+  "deaf-capture": {
+    // The tracks carry everyone's sound, the page plays none of it: detected without the indicators' help,
+    // the tracks never pass for a recovery, "Leave Computer Audio" + Join Audio brings the playback back.
+    query: { capture: "rejoin", loops: "3" },
+    deaf: true,
+    endReason: "meeting_ended",
+    expectRoster: { count: 4, names: DEFAULT_NAMES },
+    timeoutSec: 300,
+    after: async ({ dir, log, checks, events, issues, state, utterances }) => {
+      const detected = log.find((e) => /^Deaf bot: the participants' audio tracks carry sound, but the recording is digital silence \(capture\)/.test(e.msg));
+      checks.ok(detected?.level === "warn", "capture detected (warn in events.jsonl)", log.filter((e) => /^Deaf /.test(e.msg)).map((e) => e.msg));
+      checks.ok(
+        detected?.data?.reason === "capture" && detected.data.trackSoundSec * 1000 >= E2E_DEAF_GUARD.captureSoundMs && detected.data.trackMax >= 0.01 && (detected.data.peakDbfs ?? -Infinity) < -80,
+        "detection evidence: sounding tracks, digital silence in the recording",
+        detected?.data,
+      );
+      checks.ok(fs.readdirSync(path.join(dir, "debug")).some((f) => /-deaf\.json$/.test(f)), "debug dump at detection");
+      checks.ok(events.some((e) => e.type === "capture" && e.on === true), "the mock really played nothing", events.filter((e) => e.type === "capture"));
+      const left = events.findIndex((e) => e.type === "audio-left");
+      checks.ok(left >= 0 && events.some((e, i) => e.type === "audio-joined" && i > left), "the bot left and joined computer audio again");
+      const fixedAt = events.find((e) => e.type === "capture" && e.on === false)?.t ?? Infinity;
+      checks.ok(Number.isFinite(fixedAt), "the mock played the meeting again after the rejoin");
+      const recovered = log.find((e) => /^Audio recovered after .* in the recording/.test(e.msg));
+      checks.ok(recovered && recovered.t >= fixedAt && /^recording/.test(recovered.data?.by ?? ""), "\"Audio recovered\" only once the recording had sound (the tracks never counted)", recovered ?? null);
+      checks.ok(!log.some((e) => /^Audio recovered/.test(e.msg) && e.t < fixedAt), "no recovery claimed while only the tracks had sound");
+      checks.ok(
+        issues.some((i) => i.issue && i.issue.reason === "capture" && i.issue.escalated === false && /^Бот слышит участников, но звук не попадает в запись\./.test(i.issue.message)),
+        "state.json showed the capture issue while recovering",
+        issues.map((i) => i.issue),
+      );
+      checks.ok(!issues.some((i) => i.issue?.escalated), "never escalated to the warning");
+      checks.ok(issues.at(-1)?.issue === null && (state?.audioIssue ?? null) === null, "the issue cleared after recovery");
+      checks.ok(events.filter((e) => e.type === "joined").length === 1, "no page reload was needed");
+      const endAt = events.filter((e) => e.type === "end").at(-1)?.t ?? Infinity;
+      checks.ok(
+        !events.some((e) => e.type === "ended-for-all") && events.filter((e) => e.type === "left").every((e) => e.t >= endAt),
+        "recovery never clicked Leave Meeting / End",
+        events.filter((e) => ["left", "ended-for-all", "end"].includes(e.type)),
+      );
+      checks.ok(utterances.length >= 6, "speech after the recovery was checked in audio.pcm", utterances.length);
+    },
+  },
+  "deaf-silent": {
+    // No false positive: 20 s of a silent meeting with nobody lit, then a sticky indicator over silence.
+    query: { silent: "1", sticky: "Анна Смирнова", stickyAfterSec: "20", loops: "2" },
+    endReason: "meeting_ended",
+    expectRoster: { count: 4, names: DEFAULT_NAMES },
+    after: async ({ log, checks, events, dir }) => {
+      checks.ok(events.some((e) => e.type === "sticky"), "the mock lit a sticky indicator");
+      checks.ok(log.some((e) => /^Deaf guard: the recording is silent, but nobody is speaking: not deaf/.test(e.msg)), "decision logged: silent meeting, nobody speaking");
+      checks.ok(log.some((e) => /^Deaf guard: the recording is silent, but the speaker indicator does not change \(sticky\): not deaf/.test(e.msg)), "decision logged: sticky indicator");
+      const peak = pcmPeak(path.join(dir, "audio.pcm"));
+      checks.ok(peak <= NO_SPEECH_PEAK, "audio.pcm has no meeting audio (peak below -60 dBFS)", peak);
+      const sticky = readJsonl(path.join(dir, "speakers.jsonl")).filter((l) => l.speakers.includes("Анна Смирнова"));
+      checks.ok(sticky.length === 1, "the sticky indicator was one speaker line", sticky);
+    },
   },
 };
 

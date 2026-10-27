@@ -360,17 +360,41 @@ export class AloneDetector {
   }
 }
 
-/** Leave after `timeoutMs` without any audible sound in the recording (0 = never). */
+/**
+ * Leave after `timeoutMs` without any audible sound in the recording (0 = never).
+ * Time that was not observed is not silence: a gap of more than `maxGapMs` between two
+ * update() calls (a VM resume, the wall clock stepping forward, sampling paused by a
+ * recovery step) moves the silent stretch's start forward by the gap, never past now;
+ * a clock that stepped back by more than a second restarts the stretch from now.
+ */
 export class SilenceDetector {
-  constructor(timeoutMs, startT, threshold = 0.0003) {
+  constructor(timeoutMs, startT, threshold = 0.0003, maxGapMs = 30_000) {
     this.timeoutMs = timeoutMs;
     this.threshold = threshold;
+    this.maxGapMs = maxGapMs;
     this.lastSoundAt = startT;
+    /** Time of the previous update(), null before the first. */
+    this.lastUpdateAt = null;
   }
 
   update(t, rms) {
+    if (this.lastUpdateAt !== null) {
+      const gap = t - this.lastUpdateAt;
+      if (gap < -1_000) this.lastSoundAt = t;
+      else if (gap > this.maxGapMs) this.lastSoundAt = Math.min(t, this.lastSoundAt + gap);
+    }
+    this.lastUpdateAt = t;
     if (rms !== null && rms !== undefined && rms >= this.threshold) this.lastSoundAt = t;
     return this.timeoutMs > 0 && t - this.lastSoundAt >= this.timeoutMs;
+  }
+
+  /**
+   * The meeting is alive although the recording is silent (the deaf-bot guard sees
+   * participants speaking, or a recovery step just rebuilt the audio, DESIGN §6.8):
+   * restart the timeout like sound would. Never moves it back.
+   */
+  activity(t) {
+    if (Number.isFinite(t) && t > this.lastSoundAt) this.lastSoundAt = t;
   }
 
   silentForMs(t) {

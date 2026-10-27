@@ -1,6 +1,7 @@
 // Google Meet web-client adapter (meet.google.com).
 // Unified with the Zoom/Telemost bot-runner contract:
-//   join(ctx), sample(ctx), sweep(ctx), ensureAudio(ctx), sendChat(ctx, text), leave(ctx).
+//   join(ctx), sample(ctx), sweep(ctx), ensureAudio(ctx), recoverAudio(ctx, step), sendChat(ctx, text), leave(ctx).
+import { recoverPageAudio } from "./lib/audio-recovery.mjs";
 import { BotError, StopRequested, sleep, sleepUnless } from "./lib/proc.mjs";
 import { classifyMeetPage, MEET_ERRORS } from "./lib/meet-state.mjs";
 
@@ -408,6 +409,7 @@ export default {
   sample: sampleMeeting,
   sweep: sweepPopups,
   ensureAudio,
+  recoverAudio: recoverPageAudio,
   sendChat,
   leave: leaveMeeting,
 };

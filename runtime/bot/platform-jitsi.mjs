@@ -1,5 +1,6 @@
 // Jitsi Meet web-client adapter (meet.jit.si / self-hosted Jitsi).
 // Unified with the Zoom/Meet/Telemost bot-runner contract.
+import { recoverPageAudio } from "./lib/audio-recovery.mjs";
 import { BotError, StopRequested, sleep, sleepUnless } from "./lib/proc.mjs";
 
 const avatarCamera = (ctx) => ctx.camera === "avatar";
@@ -169,6 +170,7 @@ export default {
   sample: sampleMeeting,
   sweep: async () => [],
   ensureAudio: async () => ({ joined: true, needsJoin: false }),
+  recoverAudio: recoverPageAudio,
   sendChat: async () => ({ verified: false }),
   leave: async (ctx) => {
     await evalOp(ctx.page, { op: "leave" });

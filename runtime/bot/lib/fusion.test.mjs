@@ -2,7 +2,10 @@
 // Run: node --test runtime/bot/lib/
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { rmsS16le } from "./av.mjs";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { PcmTail, measureS16le, rmsS16le } from "./av.mjs";
 import {
   AloneDetector,
   Debouncer,
@@ -264,6 +267,54 @@ describe("SilenceDetector", () => {
     const s = new SilenceDetector(0, 0);
     assert.equal(s.update(10_000_000, 0), false);
   });
+
+  it("activity() restarts the timeout like sound, and never moves it back", () => {
+    const s = new SilenceDetector(30_000, 0);
+    s.activity(25_000);
+    assert.equal(s.update(54_000, 0), false);
+    s.activity(10_000);
+    s.activity(Number.NaN);
+    assert.equal(s.update(55_000, 0), true);
+    assert.equal(s.silentForMs(55_000), 30_000);
+  });
+
+  /** Quiet updates every `every` ms over [from, to]; the time of the first that fires, else null. */
+  const firesAt = (s, from, to, every = 1_000) => {
+    for (let t = from; t <= to; t += every) if (s.update(t, 0)) return t;
+    return null;
+  };
+
+  it("time not observed is not silence: a forward clock step (VM resume) never ends a talking meeting", () => {
+    // Verifier review 2026-10-27: an 11-minute forward step ended the meeting on the next quiet read.
+    const s = new SilenceDetector(600_000, 0);
+    assert.equal(firesAt(s, 1_000, 99_000), null);
+    s.update(100_000, 0.05); // sound
+    assert.equal(s.update(100_000 + 660_000, null), false, "the first read after the step");
+    // The silent stretch counts only the observed time: 600 s of quiet reads after the step.
+    assert.equal(firesAt(s, 761_000, 2_000_000), 760_000 + 600_000);
+  });
+
+  it("a recovery step that paused sampling for a minute does not count, normal read gaps do", () => {
+    const paused = new SilenceDetector(600_000, 0);
+    assert.equal(firesAt(paused, 1_000, 300_000), null);
+    assert.equal(firesAt(paused, 360_000, 2_000_000), 660_000, "600 s of observed silence");
+    // Reads 20 s apart (a slow page) are observed time: the timeout fires on time.
+    assert.equal(firesAt(new SilenceDetector(600_000, 0), 20_000, 2_000_000, 20_000), 600_000);
+  });
+
+  it("a backward clock step restarts the stretch from the new time instead of stalling until the clock catches up", () => {
+    const HOUR = 3_600_000;
+    const s = new SilenceDetector(600_000, 0);
+    s.update(100_000, 0.05);
+    assert.equal(firesAt(s, 101_000, 200_000), null);
+    const stepAt = 201_000 - HOUR;
+    assert.equal(firesAt(s, stepAt, stepAt + 2 * HOUR), stepAt + 600_000);
+    // Jitter of up to a second back is no step.
+    const jitter = new SilenceDetector(600_000, 0);
+    jitter.update(100_000, 0);
+    jitter.update(99_300, 0);
+    assert.equal(jitter.silentForMs(99_300), 99_300);
+  });
 });
 
 describe("rmsS16le", () => {
@@ -273,5 +324,38 @@ describe("rmsS16le", () => {
     for (let i = 0; i < n; i += 1) buffer.writeInt16LE(Math.round(0.5 * 32767 * Math.sin((2 * Math.PI * 440 * i) / 16000)), i * 2);
     assert.ok(Math.abs(rmsS16le(buffer) - 0.3536) < 0.002);
     assert.equal(rmsS16le(Buffer.alloc(0)), 0);
+  });
+
+  it("measureS16le reports the peak for the deaf-bot guard (-80 dBFS ≈ 3 LSB)", () => {
+    const buffer = Buffer.alloc(8);
+    buffer.writeInt16LE(-3, 2);
+    buffer.writeInt16LE(2, 6);
+    const quiet = measureS16le(buffer);
+    assert.ok(Math.abs(quiet.peak - 3 / 32767) < 1e-9 && quiet.peak < 1e-4);
+    const zero = measureS16le(Buffer.alloc(64));
+    assert.deepEqual(zero, { rms: 0, peak: 0 });
+    const full = Buffer.alloc(2);
+    full.writeInt16LE(-32768, 0);
+    assert.equal(measureS16le(full).peak, 1);
+  });
+
+  it("PcmTail skips whole samples only: a file size seen mid-sample never misaligns later reads", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "meetings-pcmtail-"));
+    try {
+      const file = path.join(dir, "audio.pcm");
+      // 0x0102 repeated: aligned reads see 258; misaligned ones would see 513 (0x0201).
+      const samples = (n) => Buffer.from(Array.from({ length: n }, () => [0x02, 0x01]).flat());
+      fs.writeFileSync(file, Buffer.concat([samples(10), Buffer.from([0x02])]));
+      const tail = new PcmTail(file);
+      // 21 bytes, at most 6 per read: an odd skip would start inside a sample.
+      const first = tail.read(6);
+      assert.equal(first.peak, 258 / 32767);
+      fs.appendFileSync(file, Buffer.concat([Buffer.from([0x01]), samples(4)]));
+      const second = tail.read(64);
+      assert.equal(second.peak, 258 / 32767);
+      assert.equal(tail.offset % 2, 0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

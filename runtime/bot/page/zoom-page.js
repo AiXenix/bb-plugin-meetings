@@ -4,6 +4,7 @@
 //
 // Ops: markers (join-flow state), sample (speaker/roster signals), sweep
 // (dismiss harmless popups), audio (computer audio / mute / camera off),
+// audioMenu (speaker choice, "Leave Computer Audio": deaf-bot recovery),
 // video (the avatar camera button), leave, chat, click, forensics, store
 // (discovery report).
 (args) => {
@@ -441,6 +442,90 @@
     return info;
   };
 
+  // ------------------------------------------------------------ audio menu (deaf-bot recovery, DESIGN §6.8)
+  // The footer's "More audio controls" menu: speaker choice and "Leave
+  // Computer Audio". Only these two kinds of items are ever pressed; anything
+  // that mentions the meeting, the webinar or ending is never touched.
+  const AUDIO_MENU_TOGGLE = ['#audioOptionMenu button[aria-label="More audio controls" i]', 'button[aria-label="More audio controls" i]'];
+  const LEAVE_AUDIO = /^leave (computer )?audio$|^отключить звук компьютера$|^выйти из (звука|аудиоконференции)( компьютера)?$/i;
+  // "Конференция" is the meeting; "аудиоконференция" (the audio conference) is what LEAVE_AUDIO leaves.
+  const NEVER_PRESS = /meeting|webinar|\bend\b|for all|встреч|вебинар|заверш|(?<!аудио)конференци/i;
+  const SPEAKER_ITEM = /select a speaker|выберите (динамик|громкоговоритель)/i;
+  const DEFAULT_SPEAKER = [/same as system/i, /как в системе/i, /^(select a speaker\s*)?default\b/i, /\bdefault\b/i, /по умолчанию/i];
+  const audioMenuToggle = () => firstAny(AUDIO_MENU_TOGGLE);
+  const audioMenuOpen = () => {
+    const root = q("#audioOptionMenu");
+    if (root && (q('[aria-expanded="true"]', root) || qa('.dropdown-menu, [role="menu"]', root).some(visible))) return true;
+    return qa('[role="menu"], .dropdown-menu').some((el) => visible(el) && /leave (computer )?audio|select a speaker|select a microphone/i.test(`${textOf(el)} ${qa("[aria-label]", el).map(label).join(" ")}`));
+  };
+  const audioMenuItems = () => {
+    const root = q("#audioOptionMenu");
+    const toggle = audioMenuToggle();
+    const found = unique([
+      ...(root ? qa('[role^="menuitem"], [role="option"], a, li, button', root) : []),
+      ...qa('[role="menu"] [role^="menuitem"], [role="menu"] a, [role="menu"] li, .dropdown-menu [role^="menuitem"], .dropdown-menu a, .dropdown-menu li').filter(visible),
+    ]).filter((el) => el !== toggle && !(toggle && el.contains(toggle)));
+    // The clickable element, not its wrapper: drop a container that holds another candidate with the
+    // same text (the <a role=menuitem> inside an <li> carries the handler), then menu items first.
+    const rank = (el) => (/^menuitem/.test(el.getAttribute("role") || "") ? 0 : el.matches("a, button, [role=button], [role=option]") ? 1 : 2);
+    return found
+      .filter((el) => !found.some((other) => other !== el && el.contains(other) && textOf(other) === textOf(el)))
+      .sort((a, b) => rank(a) - rank(b));
+  };
+  const itemSays = (el) => `${textOf(el)} | ${label(el)}`;
+  const isChecked = (el) =>
+    el.getAttribute("aria-checked") === "true" ||
+    el.getAttribute("aria-selected") === "true" ||
+    /(^|[\s_-])(checked|selected|active)($|[\s_-])/i.test(typeof el.className === "string" ? el.className : "") ||
+    !!q('[class*="check" i], [aria-label*="check" i]', el);
+  const describeItems = (items) => items.slice(0, 30).map((el) => ({ text: textOf(el).slice(0, 80), label: label(el).slice(0, 80), checked: isChecked(el) }));
+
+  const audioMenu = (action) => {
+    const toggle = audioMenuToggle();
+    if (action === "open") {
+      const wasOpen = audioMenuOpen();
+      if (!wasOpen && toggle) press(toggle);
+      return { toggle: !!toggle, wasOpen, open: audioMenuOpen(), items: describeItems(audioMenuItems()) };
+    }
+    if (action === "close") {
+      const wasOpen = audioMenuOpen();
+      if (wasOpen && toggle) press(toggle);
+      return { wasOpen, open: audioMenuOpen() };
+    }
+    const items = audioMenuItems();
+    if (action === "leave") {
+      const item = items.find((el) => (LEAVE_AUDIO.test(textOf(el)) || LEAVE_AUDIO.test(label(el))) && !NEVER_PRESS.test(itemSays(el)));
+      if (item) press(item);
+      return { clicked: item ? textOf(item) || label(item) : null, items: describeItems(items) };
+    }
+    if (action === "speaker") {
+      // Speaker items only: Zoom lists "Same as System" (and "…Default…" devices) for the microphone too.
+      const MIC = /microphone|микрофон/i;
+      const labeled = items.filter((el) => SPEAKER_ITEM.test(label(el)));
+      let speakers = labeled;
+      if (speakers.length === 0) {
+        // No aria-labels: the items between the "Select a Speaker" header and the next section header.
+        const headers = qa("li, div, span, h1, h2, h3, h4, [role=presentation], [role=heading]", q("#audioOptionMenu") || document).filter((el) => /^(select a )?(speaker|microphone|camera)s?$/i.test(textOf(el)));
+        const speakerHeader = headers.find((el) => /speaker/i.test(textOf(el))) || null;
+        const after = (a, b) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+        speakers = speakerHeader
+          ? items.filter((el) => after(speakerHeader, el) && !headers.some((h) => h !== speakerHeader && after(speakerHeader, h) && after(h, el)))
+          : [];
+      }
+      speakers = speakers.filter((el) => !MIC.test(label(el)) && !NEVER_PRESS.test(itemSays(el)));
+      let pick = null;
+      for (const pattern of DEFAULT_SPEAKER) {
+        pick = speakers.find((el) => pattern.test(textOf(el)) || pattern.test(label(el).replace(SPEAKER_ITEM, "").trim()));
+        if (pick) break;
+      }
+      if (!pick || NEVER_PRESS.test(itemSays(pick))) return { clicked: null, already: false, items: describeItems(items) };
+      if (isChecked(pick)) return { clicked: null, already: true, item: textOf(pick) || label(pick), items: describeItems(items) };
+      press(pick);
+      return { clicked: textOf(pick) || label(pick), already: false, items: describeItems(items) };
+    }
+    return null;
+  };
+
   // ------------------------------------------------------------ actions
   const click = (selectors, mode) => {
     const el = mode === "any" ? firstAny(selectors) : firstVisible(selectors);
@@ -627,6 +712,8 @@
       return audio(args.action);
     case "video":
       return video(args.action);
+    case "audioMenu":
+      return audioMenu(args.action);
     case "leave":
       return leave(args.step);
     case "chat":

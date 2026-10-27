@@ -1,6 +1,7 @@
 // Yandex Telemost web-client adapter (telemost.yandex.ru / telemost.360.yandex.ru).
 // Unified with the Zoom/Meet/Jitsi bot-runner contract:
-//   join(ctx), sample(ctx), sweep(ctx), ensureAudio(ctx), sendChat(ctx, text), leave(ctx).
+//   join(ctx), sample(ctx), sweep(ctx), ensureAudio(ctx), recoverAudio(ctx, step), sendChat(ctx, text), leave(ctx).
+import { recoverPageAudio } from "./lib/audio-recovery.mjs";
 import { BotError, StopRequested, sleep, sleepUnless } from "./lib/proc.mjs";
 
 const avatarCamera = (ctx) => ctx.camera === "avatar";
@@ -97,14 +98,42 @@ export const TELEMOST_OP = `((args) => {
     const active = [];
     const seen = new Set();
     const botNameLower = (args.botName || "").toLowerCase().trim();
-    const isNoise = (n) =>
+    // inBadge: the text is a tile's display name (its full title). "Гость"/"Guest" is then the
+    // default name of an anonymous guest (a real participant), not a UI label, and a name that is
+    // only part of the bot's ("Анна" next to the bot "Notetaker Анна") is a person, not the bot.
+    const isNoise = (n, inBadge = false) =>
       !n ||
       n.length < 2 ||
       n.length > 60 ||
-      /^(вы|you|гость|guest|демонстрация|участники.*|чат|ещё|подключиться.*|выйти.*|13.*|\\+1 тб|яндекс.*|телемост.*|частые вопросы.*|тариф.*)$/i.test(
+      (!inBadge && /^(гость|guest)$/i.test(n)) ||
+      /^(вы|you|демонстрация|участники.*|чат|ещё|подключиться.*|выйти.*|13.*|\\+1 тб|яндекс.*|телемост.*|частые вопросы.*|тариф.*)$/i.test(
         n
       ) ||
-      (botNameLower && (n.toLowerCase() === botNameLower || n.toLowerCase().includes(botNameLower) || botNameLower.includes(n.toLowerCase())));
+      (botNameLower &&
+        (n.toLowerCase() === botNameLower || n.toLowerCase().includes(botNameLower) || (!inBadge && botNameLower.includes(n.toLowerCase()))));
+
+    const NAME_BADGE = "[class*='TextName_'][title], [data-testid='participant-name']";
+    // Telemost outlines a speaking participant's tile: its client adds the
+    // CSS-module class rootStroke_<hash> (a 4px brand-coloured ::after border)
+    // to the tile's inner root while the server's voice-activity flag for that
+    // slot is on and the participant is not muted. The generic Goloom slot
+    // renderer marks the same flag with "GoloomParticipantsRenderer__Item_VAD".
+    // No aria-label says who speaks (a guessed *='говорит' would also match the
+    // tile note "Видео появится, когда участник заговорит").
+    const SPEAKING = "[class*='rootStroke_'], [class*='__Item_VAD']";
+    // A badge's tile: the grid item, else its largest ancestor holding no other
+    // name badge. The grid container holds every tile and must never count as one.
+    const tileOf = (badge) => {
+      const item = badge.closest("[class*='newGridItem_'], [class~='GoloomParticipantsRenderer__Item']");
+      if (item && item.querySelectorAll(NAME_BADGE).length === 1) return item;
+      let el = badge;
+      while (el.parentElement && el.parentElement !== document.body && el.parentElement.querySelectorAll(NAME_BADGE).length === 1) {
+        el = el.parentElement;
+      }
+      return el;
+    };
+    const isSpeaking = (tile) =>
+      tile.matches(SPEAKING) || Boolean(tile.querySelector(SPEAKING)) || /speaking|talking/i.test(typeof tile.className === "string" ? tile.className : "");
 
     // Check participant tiles in Telemost
     const placeholders = Array.from(
@@ -114,17 +143,20 @@ export const TELEMOST_OP = `((args) => {
     );
     // The current Telemost 360 client renders the display name in a titled
     // badge. Read badges separately so multiple names never become one string.
-    for (const badge of document.querySelectorAll("[class*='TextName_'][title], [data-testid='participant-name']")) {
-      if (!vis(badge)) continue;
+    // Two tiles can share a name (several anonymous guests): either one lights it.
+    // The self view is the bot, whatever name it shows (a signed-in account's).
+    for (const badge of document.querySelectorAll(NAME_BADGE)) {
+      if (!vis(badge) || badge.closest("[class*='selfView_']")) continue;
       const candidate = attr(badge, "title") || txt(badge);
-      if (isNoise(candidate) || seen.has(candidate)) continue;
-      seen.add(candidate);
-      names.push(candidate);
-      const tile = badge.closest("[class*='newGridItem_'], [class*='Participant']") || badge.parentElement;
-      if (tile && (/speaking|talking/i.test(tile.className) || tile.querySelector("[aria-label*='speaking' i], [aria-label*='говорит' i]"))) active.push(candidate);
+      if (isNoise(candidate, true)) continue;
+      if (!seen.has(candidate)) {
+        seen.add(candidate);
+        names.push(candidate);
+      }
+      if (!active.includes(candidate) && isSpeaking(tileOf(badge))) active.push(candidate);
     }
     for (const ph of placeholders) {
-      if (document.querySelector("[class*='TextName_'][title], [data-testid='participant-name']")) break;
+      if (document.querySelector(NAME_BADGE)) break;
       const card = ph.closest("[class*='tile' i], [class*='item' i], [class*='cell' i], [class*='video' i]") || ph.parentElement || ph;
       const candidate = txt(card);
       if (!isNoise(candidate) && !seen.has(candidate)) {
@@ -426,17 +458,23 @@ export async function sampleMeeting(ctx) {
     : names.length > 0
       ? names.length + 1
       : null;
+  // Telemost sends the meeting audio as SFU-mixed slots (goloom_mid_audio): one track carries
+  // whoever is speaking (every recorded meeting: only the first of three tracks was ever loud).
+  // A track id says nothing about who talks, so the tracks go to the fusion without one: it must
+  // not learn a name for the mixed track and put that name over the outlined tile at every turn.
+  // The levels still reach the deaf-bot guard (capture mode, recovery) and signals.jsonl.
+  const levels = (Array.isArray(p.tracks) ? p.tracks : []).map((track) => Number(track?.level ?? track?.lvl) || 0);
 
   return {
     signals: {
       store: active.length > 0 ? active : null,
       tile: active.length > 0 ? active : null,
-      tracks: Array.isArray(p.tracks) ? p.tracks : [],
+      tracks: levels.map((level) => ({ level })),
     },
     roster: names.length > 0 ? names : null,
     count,
     ended,
-    raw: { platform: "telemost", active, count, names },
+    raw: { platform: "telemost", active, count, names, levels: levels.map((level) => Math.round(level * 1000) / 1000) },
   };
 }
 
@@ -483,6 +521,7 @@ export default {
   sample: sampleMeeting,
   sweep: sweepPopups,
   ensureAudio,
+  recoverAudio: recoverPageAudio,
   sendChat,
   leave: leaveMeeting,
 };

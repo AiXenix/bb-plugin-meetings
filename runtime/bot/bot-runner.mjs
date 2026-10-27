@@ -13,6 +13,8 @@ import { ACCOUNT_LABELS, LOGIN_URLS, profileFor, sessionReady } from "./lib/acco
 import { PcmTail, Recorder, ensurePulse, gcStalePulseModules, loadPulseModules, startXvfb, stopXvfb, unloadPulseModules } from "./lib/av.mjs";
 import { SCREEN, killChromeForProfile, killChromeForProfileSync, launchChrome, prepareProfile, resolveChromePath } from "./lib/chrome.mjs";
 import { ControlChannel } from "./lib/control.mjs";
+import { kickPageAudio } from "./lib/audio-recovery.mjs";
+import { DeafGuard } from "./lib/deaf-guard.mjs";
 import { cameraPlan, fakeMediaArgs, withSilence } from "./lib/media.mjs";
 import { appendJsonl, ensureDir, readJson, stamp, writeFileAtomic, writeJsonAtomic } from "./lib/files.mjs";
 import { AloneDetector, SilenceDetector, SpeakerFusion, cleanNames, sameSet } from "./lib/fusion.mjs";
@@ -37,6 +39,18 @@ const NO_SPEAKER_DUMP_MS = 120_000;
 const MAX_DEBUG_DUMPS = 40;
 /** RMS of the recording above which "there is audio" for the no-speaker forensics. */
 const AUDIBLE_RMS = 0.003;
+/** s16le 16 kHz mono. */
+const PCM_BYTES_PER_SEC = 32_000;
+/**
+ * At most this much of the newest audio.pcm is measured per read (20 s). It must cover the
+ * deaf-bot guard's maxPcmGapMs: a slow tick shorter than that counts as measured, so all of it
+ * has to be read (a longer one restarts the guard's silent stretch anyway).
+ */
+const PCM_MEASURE_SEC = 20;
+/** A deaf-bot "rejoin the meeting audio" step may take this long; then it is called off. */
+const AUDIO_RECOVERY_TIMEOUT_MS = 60_000;
+/** A called-off step gets this long to finish its current page op. */
+const AUDIO_RECOVERY_SETTLE_MS = 15_000;
 const MEETING_ID = /^mtg_[a-z0-9]{6,32}$/;
 export const PLATFORMS = { zoom: zoomPlatform, meet: meetPlatform, telemost: telemostPlatform, jitsi: jitsiPlatform, mock: mockPlatform };
 
@@ -117,8 +131,18 @@ export class BotRunner {
       participants: { count: null, names: [] },
       activeSpeakers: [],
       audio: { seconds: 0, bytes: 0 },
+      /** Deaf-bot guard (lib/deaf-guard.mjs): null, or {since, attempts, lastAction, message, escalated}. */
+      audioIssue: null,
       updatedAt: now,
     };
+    /** lib/deaf-guard.mjs DeafGuard of the running meeting. */
+    this.deafGuard = null;
+    /** Time limit of one "rejoin the meeting audio" step (tests shorten it). */
+    this.audioRecoveryTimeoutMs = AUDIO_RECOVERY_TIMEOUT_MS;
+    /** state.detail while the deaf-bot guard is recovering or warning (null = plain "Recording"). */
+    this.deafDetail = null;
+    /** Extra Russian sentence for audioIssue.message while a page reload waits (waiting room). */
+    this.recoveryNote = null;
     this.log = this.log.bind(this);
     this.setPhase = this.setPhase.bind(this);
   }
@@ -224,7 +248,7 @@ export class BotRunner {
       const now = Date.now();
       const viewer = this.control?.viewerActive(now) ?? false;
       const every = viewer ? 1_000 : this.config.screenshotIntervalSec > 0 ? this.config.screenshotIntervalSec * 1_000 : Infinity;
-      if (this.page && (this.screenshotWanted || now - this.lastShotAt >= every)) {
+      if (this.page && (this.screenshotWanted || now - this.lastShotAt >= every || now < this.lastShotAt)) {
         this.screenshotWanted = false;
         await this.screenshot();
       }
@@ -259,6 +283,7 @@ export class BotRunner {
       frames: page.frames().map((f) => ({ name: f.name(), url: f.url().slice(0, 300) })),
       state: { phase: this.state.phase, detail: this.state.detail },
       fusion: this.fusion ? { current: this.fusion.current, tracks: this.fusion.trackSnapshot(), mapping: this.fusion.resolver.mapping() } : null,
+      deafGuard: this.deafGuard ? this.deafGuard.debugState() : null,
       forensics,
     };
     await writeFileAtomic(`${base}.json`, `${JSON.stringify(report, null, 2)}\n`).catch(() => {});
@@ -357,7 +382,11 @@ export class BotRunner {
     const adapter = PLATFORMS[config.platform];
     const short = config.meetingId.slice(4, 16);
     this.selectors = config.platform === "zoom" || config.platform === "mock" ? resolveSelectors(config.speakerSelectors)
-      : { lagMs: { track: 100, store: 700, tile: 700, ...config.speakerSelectors?.lagMs }, fusion: { ...config.speakerSelectors?.fusion } };
+      : {
+          lagMs: { track: 100, store: 700, tile: 700, ...config.speakerSelectors?.lagMs },
+          fusion: { ...config.speakerSelectors?.fusion },
+          deafGuard: { ...config.speakerSelectors?.deafGuard },
+        };
     this.setPhase("starting", "Preparing audio devices and a virtual display");
     await ensurePulse(this.log);
     await gcStalePulseModules(short, this.log);
@@ -475,6 +504,10 @@ export class BotRunner {
     const alone = new AloneDetector(config.aloneTimeoutSec * 1_000, joinedAt);
     const silence = new SilenceDetector((config.silenceTimeoutSec ?? 0) * 1_000, this.state.recordingStartedAt ?? joinedAt);
     const pcm = new PcmTail(this.file("audio.pcm"));
+    const guard = new DeafGuard(this.selectors.deafGuard ?? {});
+    this.deafGuard = guard;
+    const pcmMeasureBytes = Math.ceil(Math.max(PCM_MEASURE_SEC, guard.options.maxPcmGapMs / 1_000 + 5)) * PCM_BYTES_PER_SEC;
+    if (!guard.enabled) this.log("info", "Deaf-bot guard is off (speakerSelectors.deafGuard.enabled = false)");
     let lastRosterKey = "";
     let lastRosterAt = 0;
     let lastSignalsAt = 0;
@@ -486,6 +519,8 @@ export class BotRunner {
     let lastNoSpeakerDump = -Infinity;
     let lastAudioCheckAt = Date.now();
     let failingSince = null;
+    /** The silence timeout was held back because the deaf-bot guard sees the meeting talking (logged once). */
+    let silenceHeld = false;
 
     for (;;) {
       const now = Date.now();
@@ -496,6 +531,8 @@ export class BotRunner {
       }
 
       let sample = null;
+      /** What the deaf-bot guard sees this tick (speakers null = unknown: the sample failed). */
+      const seen = { speakers: null, tracks: [], count: null, pcmPeak: undefined };
       try {
         sample = await adapter.sample(ctx);
         failingSince = null;
@@ -520,7 +557,8 @@ export class BotRunner {
         if (!sameSet(this.state.activeSpeakers, this.fusion.current)) {
           this.state.activeSpeakers = [...this.fusion.current];
         }
-        if (this.fusion.current.length > 0) lastSpeakerAt = now;
+        // `now < last…` here and below: the wall clock stepped back; restart the timer instead of stalling until it catches up.
+        if (this.fusion.current.length > 0 || now < lastSpeakerAt) lastSpeakerAt = now;
 
         const names = cleanNames(sample.roster ?? [], config.botName);
         const count = Number.isFinite(sample.count) ? sample.count : null;
@@ -532,11 +570,15 @@ export class BotRunner {
           writeJsonAtomic(this.file("roster.json"), { t: now, count, names });
           this.state.participants = { count, names };
         }
+        // The meeting UI's speaking indicators (not the track-based fusion): who the platform shows as talking.
+        seen.speakers = cleanNames(sample.signals.store ?? sample.signals.tile ?? [], config.botName);
+        seen.tracks = (sample.signals.tracks ?? []).map((track) => Number(track?.level) || 0);
+        seen.count = count;
         if (alone.update(now, count)) {
           const mins = Math.round((alone.aloneForMs(now) / 60_000) * 10) / 10;
           return { phase: "ended", endReason: "alone", error: null, detail: `Nobody else in the meeting for ${mins} min; leaving` };
         }
-        if (now - lastSignalsAt >= SIGNALS_PERIOD_MS) {
+        if (now - lastSignalsAt >= SIGNALS_PERIOD_MS || now < lastSignalsAt) {
           lastSignalsAt = now;
           appendJsonl(this.file("signals.jsonl"), {
             t: now,
@@ -551,34 +593,229 @@ export class BotRunner {
         }
       }
 
-      if (now - lastPcmAt >= 1_000) {
+      // `now < lastPcmAt`: the wall clock stepped back; measure anyway instead of going blind until it catches up.
+      if (now - lastPcmAt >= 1_000 || now < lastPcmAt) {
         lastPcmAt = now;
-        const rms = pcm.readRms();
+        const measured = pcm.read(pcmMeasureBytes);
+        const rms = measured?.rms ?? null;
+        seen.pcmPeak = measured ? measured.peak : null;
         if (rms !== null && rms >= AUDIBLE_RMS) lastAudibleAt = now;
-        if (silence.update(now, rms)) {
+        else if (now < lastAudibleAt) lastAudibleAt = 0;
+        // The guard's episode is open and the meeting talks (indicators or tracks) while the recording is
+        // silent: that silence is the bot's problem, not an empty meeting, and must not end the recording
+        // while the guard keeps retrying. The timeout counts from the last such evidence (DESIGN §6.8).
+        const talking = guard.enabled && guard.speakingWhileDeaf(now);
+        const silentTooLong = silence.update(now, rms);
+        if (silentTooLong && !talking) {
           const mins = Math.round((silence.silentForMs(now) / 60_000) * 10) / 10;
           return { phase: "ended", endReason: "silence", error: null, detail: `No audio for ${mins} min; leaving` };
         }
+        if (talking) {
+          if (silentTooLong && !silenceHeld) {
+            silenceHeld = true;
+            const mins = Math.round((silence.silentForMs(now) / 60_000) * 10) / 10;
+            this.log("info", `No audio for ${mins} min, but the meeting is talking (deaf bot): staying in the meeting`);
+          }
+          silence.activity(now);
+        }
       }
-      if (now - lastSpeakerAt > NO_SPEAKER_DUMP_MS && now - lastAudibleAt < 10_000 && now - lastNoSpeakerDump > 10 * 60_000) {
+      if (guard.enabled) {
+        const action = guard.observe({
+          t: now,
+          speakers: seen.speakers,
+          botName: config.botName,
+          pcmPeak: seen.pcmPeak,
+          trackLevels: seen.tracks,
+          participants: seen.count,
+        });
+        if (action) {
+          const end = await this.onDeafAction(adapter, ctx, guard, action);
+          if (end) return end;
+          if (action.type === "rejoin_audio" || action.type === "reload") {
+            // The meeting audio was just rebuilt, and a reload may have waited in the waiting room for
+            // minutes: that time is no silent meeting. Then the next tick from a fresh clock.
+            silence.activity(Date.now());
+            continue;
+          }
+        }
+      }
+      if (now - lastSpeakerAt > NO_SPEAKER_DUMP_MS && now - lastAudibleAt < 10_000 && (now - lastNoSpeakerDump > 10 * 60_000 || now < lastNoSpeakerDump)) {
         lastNoSpeakerDump = now;
         this.log("warn", "Audio is playing but no speaker was detected for 2 min; dumping the DOM");
         await this.dumpDebug("no-speaker");
       }
-      if (now - lastSweepAt >= SWEEP_PERIOD_MS) {
+      if (now - lastSweepAt >= SWEEP_PERIOD_MS || now < lastSweepAt) {
         lastSweepAt = now;
         await adapter.sweep(ctx).catch(() => {});
       }
-      if (adapter.ensureAudio && now - lastAudioCheckAt >= AUDIO_CHECK_MS) {
+      if (adapter.ensureAudio && (now - lastAudioCheckAt >= AUDIO_CHECK_MS || now < lastAudioCheckAt)) {
         // Zoom can offer computer audio late or drop it mid-meeting: without it the recording is silent.
         lastAudioCheckAt = now;
         const audio = await adapter.ensureAudio(ctx).catch(() => null);
         if (audio) {
-          const detail = audio.needsJoin ? "Recording, but Zoom's computer audio is not joined: joining it again" : "Recording";
+          const detail = audio.needsJoin ? "Recording, but Zoom's computer audio is not joined: joining it again" : this.recordingDetail();
           if (detail !== this.state.detail) this.setPhase("in_meeting", detail);
         }
       }
-      await sleepUnless(Math.max(20, SAMPLE_PERIOD_MS - (Date.now() - now)), this.stopController.signal);
+      // Never longer than one period: a clock stepping back during the tick would make it the size of the step.
+      await sleepUnless(Math.min(SAMPLE_PERIOD_MS, Math.max(20, SAMPLE_PERIOD_MS - (Date.now() - now))), this.stopController.signal);
+    }
+  }
+
+  // ---------------------------------------------------------------- deaf-bot guard (DESIGN §6.8)
+
+  /** state.detail while recording: plain, or what the deaf-bot guard is doing. */
+  recordingDetail() {
+    return this.deafDetail ?? "Recording";
+  }
+
+  /** Mirror the guard's issue into state.json (with the reload's waiting-room note). */
+  setAudioIssue(issue) {
+    this.state.audioIssue = issue
+      ? { ...issue, message: this.recoveryNote ? `${issue.message} ${this.recoveryNote}` : issue.message }
+      : null;
+    this.writeState();
+  }
+
+  /**
+   * Execute one guard decision; every decision goes to events.jsonl. Recovery
+   * runs inside the sampling loop (sampling pauses, ffmpeg keeps recording)
+   * and never clicks Leave/End. Returns an end outcome when a reload could
+   * not get back into the meeting, else null.
+   */
+  async onDeafAction(adapter, ctx, guard, action) {
+    switch (action.type) {
+      case "note":
+        this.log("info", action.msg, action.evidence);
+        return null;
+      case "recovered":
+        this.log("info", action.msg, { deafSec: Math.round(action.deafMs / 100) / 10, attempts: action.attempts, tried: action.tried, ...action.evidence });
+        this.deafDetail = null;
+        this.setAudioIssue(null);
+        this.setPhase("in_meeting", this.recordingDetail());
+        return null;
+      case "warn":
+        this.log("warn", action.msg, { attempts: action.attempts, ...action.evidence });
+        this.deafDetail = `Recording, but ${deafProblem(guard)} (warning shown); rejoining the meeting audio every few minutes`;
+        this.setAudioIssue(guard.issue);
+        this.setPhase("in_meeting", this.recordingDetail());
+        return null;
+      case "rejoin_audio":
+      case "reload":
+        break;
+      default:
+        this.log("warn", `Deaf guard: unknown action ${action.type}`);
+        return null;
+    }
+    this.log("warn", action.msg, { action: action.type, attempt: action.attempt, step: action.step, reason: action.reason, ...action.evidence });
+    const what = action.type === "reload" ? "reloading the meeting page and joining again" : "rejoining the meeting audio";
+    this.deafDetail = `Recording, but ${deafProblem(guard)}: ${what} (attempt ${action.attempt})`;
+    this.setAudioIssue(guard.issue);
+    this.setPhase("in_meeting", this.recordingDetail());
+    if (action.reason === "detected") await this.dumpDebug("deaf").catch(() => {});
+    let result = { ok: false, detail: "not run" };
+    let end = null;
+    try {
+      if (action.type === "reload") ({ result, end } = await this.reloadAndRejoin(adapter, ctx));
+      else result = await this.rejoinAudio(adapter, ctx);
+    } catch (error) {
+      result = { ok: false, detail: error.message.split("\n")[0] };
+    } finally {
+      guard.done(Date.now(), result);
+      this.recoveryNote = null;
+    }
+    this.log(result.ok ? "info" : "warn", `Deaf bot: ${what} ${result.ok ? "done" : "did not work"}`, result);
+    if (guard.issue !== null) {
+      this.deafDetail = guard.issue.escalated
+        ? `Recording, but ${deafProblem(guard)} (warning shown); rejoining the meeting audio every few minutes`
+        : `Recording, but ${deafProblem(guard)}: waiting for sound after attempt ${action.attempt}`;
+    }
+    this.setAudioIssue(guard.issue);
+    if (end === null) this.setPhase("in_meeting", this.recordingDetail());
+    return end;
+  }
+
+  /**
+   * Recovery step "rejoin_audio" through the adapter (Zoom: leave and rejoin computer audio).
+   * The step gets its own signal (stop request or AUDIO_RECOVERY_TIMEOUT_MS): an overrunning
+   * step is called off and awaited (bounded) instead of clicking on in the background while
+   * the sampler, the next step or the leave flow use the page. A stop that arrived before
+   * the step (e.g. during the debug dump) skips it: the bot leaves instead.
+   */
+  async rejoinAudio(adapter, ctx) {
+    if (ctx.signal?.aborted) return { ok: false, detail: "stopping; not run" };
+    if (typeof adapter.recoverAudio !== "function") return kickPageAudio(ctx.page);
+    const limitMs = this.audioRecoveryTimeoutMs ?? AUDIO_RECOVERY_TIMEOUT_MS;
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(), limitMs);
+    const signal = ctx.signal ? AbortSignal.any([ctx.signal, timeout.signal]) : timeout.signal;
+    const running = Promise.resolve()
+      .then(() => adapter.recoverAudio({ ...ctx, signal }, "rejoin_audio"))
+      .then(
+        (result) => result ?? { ok: false, detail: "no result" },
+        (error) => ({ ok: false, detail: String(error?.message ?? error).split("\n")[0] }),
+      );
+    try {
+      const result = await within(running, limitMs, null);
+      if (result !== null) return result;
+      timeout.abort();
+      const late = await within(running, AUDIO_RECOVERY_SETTLE_MS, null);
+      if (late === null) this.log("warn", `Deaf bot: the audio rejoin did not stop within ${AUDIO_RECOVERY_SETTLE_MS / 1000} s after it was called off`);
+      return { ok: false, detail: `no answer within ${Math.round(limitMs / 100) / 10} s; called off` };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Recovery step "reload": open the meeting link again and run the
+   * adapter's normal join flow (waiting room included) while ffmpeg keeps
+   * recording. The phase stays in_meeting; the join flow's phases become the
+   * detail, and a waiting room is added to the warning so the host admits
+   * the bot. Returns {result, end}.
+   */
+  async reloadAndRejoin(adapter, ctx) {
+    // A stop arrived meanwhile (e.g. during the debug dump): leave politely from the meeting page
+    // instead of navigating away first (the join flows open the link before they look at the signal).
+    if (this.stopController.signal.aborted) return { result: { ok: false, detail: "stopping; the page was not reloaded" }, end: null };
+    // Nobody is "speaking" while the bot is outside the meeting.
+    const closing = this.fusion?.finish(Date.now());
+    if (closing) appendJsonl(this.file("speakers.jsonl"), { ...closing, src: "none" });
+    this.state.activeSpeakers = [];
+    const setPhase = ctx.setPhase;
+    ctx.adapterState = {};
+    ctx.setPhase = (phase, detail) => {
+      const before = this.recoveryNote;
+      this.recoveryNote =
+        phase === "waiting_room"
+          ? `Сейчас бот перезагрузил страницу встречи и ждёт в зале ожидания: впустите «${this.config.botName}».`
+          : phase === "waiting_for_host"
+            ? "Сейчас бот перезагрузил страницу встречи и ждёт, пока организатор начнёт встречу."
+            : null;
+      if (this.recoveryNote !== before && this.deafGuard) this.setAudioIssue(this.deafGuard.issue);
+      setPhase("in_meeting", `Rejoining after a page reload: ${detail}`);
+    };
+    try {
+      await adapter.join(ctx);
+      if (this.stopController.signal.aborted) return { result: { ok: false, detail: "stopped while rejoining" }, end: null };
+      ctx.joinedAt = Date.now();
+      this.log("info", "Rejoined the meeting after the page reload (the recording kept running)");
+      return { result: { ok: true, detail: "reloaded the meeting page and joined again" }, end: null };
+    } catch (error) {
+      if (error instanceof StopRequested || this.stopReason !== null || this.fatal !== null) {
+        return { result: { ok: false, detail: "stopped while rejoining" }, end: null };
+      }
+      const message = error.message.split("\n")[0];
+      if (!(error instanceof BotError)) return { result: { ok: false, detail: message }, end: null };
+      // Outside the meeting now: finish with what was recorded.
+      this.log("error", `Could not get back into the meeting after the page reload: ${message}`, { code: error.code });
+      const end =
+        error.code === "meeting_ended"
+          ? { phase: "ended", endReason: "meeting_ended", error: null, detail: `${message}; leaving` }
+          : this.outcomeFromError(error);
+      return { result: { ok: false, detail: message }, end };
+    } finally {
+      ctx.setPhase = setPhase;
     }
   }
 
@@ -715,6 +952,8 @@ export class BotRunner {
     this.state.error = outcome.error;
     this.state.endedAt = Date.now();
     this.state.activeSpeakers = [];
+    // A deaf episode that lasted to the end stays visible on the finished meeting, in the past tense.
+    if (this.state.audioIssue && this.deafGuard) this.state.audioIssue = this.deafGuard.issueAtEnd();
     this.terminalWritten = true;
     this.writeState();
   }
@@ -772,14 +1011,31 @@ export class BotRunner {
 
 const TERMINAL = new Set(["ended", "failed"]);
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+/** state.detail wording of the deaf-bot guard's open issue: deaf, or sound that does not reach the recording. */
+function deafProblem(guard) {
+  return guard?.reason === "capture" ? "the meeting audio does not reach the recording" : "the bot hears nobody";
+}
+
+/** Run as `node bot-runner.mjs --meeting-dir …` (also through a symlinked runtime path); importing the module (lib/deaf-runner.test.mjs) runs nothing. */
+function isMainModule() {
+  if (!process.argv[1]) return false;
+  const self = fileURLToPath(import.meta.url);
+  if (path.resolve(process.argv[1]) === self) return true;
+  try {
+    return fs.realpathSync(process.argv[1]) === fs.realpathSync(self);
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) {
   const { meetingDir } = parseArgs(process.argv.slice(2));
   const runner = new BotRunner(meetingDir);
   runner.run().then(
-  (code) => process.exit(code),
-  (error) => {
-    console.error(error);
-    process.exit(1);
-  },
+    (code) => process.exit(code),
+    (error) => {
+      console.error(error);
+      process.exit(1);
+    },
   );
 }
